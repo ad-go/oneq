@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oneq</title>
+<style>
+  :root { --bg:#f6f8f7; --fg:#1b2420; --card:#fff; --muted:#5c6b64; --line:#d5ddd9; --accent:#1b6b5a; --err:#b3261e; --ok:#1b6b5a; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111614; --fg:#e4ebe7; --card:#1a211e; --muted:#98a8a0; --line:#2c3732; --accent:#4cb89f; --err:#ff8a80; --ok:#4cb89f; --warn:#ffb74d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+  header h1 { font-size:22px; margin:0; flex:1; }
+  .dot { width:12px; height:12px; border-radius:50%; background:#8a948f; display:inline-block; margin-right:6px; vertical-align:middle; }
+  .dot.on { background:var(--ok); } .dot.mid { background:var(--warn); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+  h2 { font-size:16px; margin:0 0 10px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 3px; }
+  input[type=text], input[type=password], textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+  textarea { font-family: ui-monospace,Menlo,Consolas,monospace; font-size:12px; min-height:64px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  button { padding:8px 14px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--fg); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .check { display:flex; gap:8px; align-items:flex-start; margin:8px 0; font-size:14px; }
+  .check input { margin-top:4px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; } td,th { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-weight:500; }
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; max-height:220px; overflow:auto; font-size:12px; white-space:pre-wrap; }
+  #note { margin-top:10px; min-height:1.2em; } .err { color:var(--err); } .ok { color:var(--ok); }
+  .muted { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>oneq</h1><div id="badge"><span class="dot"></span><span id="state">…</span></div></header>
+
+  <section id="status">
+    <h2>Status</h2>
+    <div id="summary" class="muted">Loading…</div>
+    <table id="peers" hidden><thead><tr><th>Member</th><th>Address</th><th>Session</th></tr></thead><tbody></tbody></table>
+    <details style="margin-top:10px"><summary class="muted">Log</summary><pre id="log"></pre></details>
+    <div class="row">
+      <button id="stop">Disconnect</button>
+      <button id="start">Start</button>
+      <button id="uninstall">Remove service</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Connection</h2>
+    <label for="relays">Relays (https://host:port, one per line)</label>
+    <textarea id="relays" spellcheck="false"></textarea>
+    <label for="community">Community</label><input type="text" id="community" autocomplete="off">
+    <label for="user">User</label><input type="text" id="user" autocomplete="off">
+    <label for="password">Password (never saved; only handed to the service installer)</label><input type="password" id="password" autocomplete="off">
+    <label for="name">Device name (optional)</label><input type="text" id="name" autocomplete="off">
+    <label for="ca">Private CA certificate, PEM (empty = public CAs)</label>
+    <textarea id="ca" spellcheck="false"></textarea>
+    <div class="check"><input type="checkbox" id="auto"><label for="auto" style="margin:0;color:var(--fg);font-size:14px">Start at boot (otherwise the service is installed but started by hand)</label></div>
+    <div class="check"><input type="checkbox" id="force"><label for="force" style="margin:0;color:var(--fg);font-size:14px">Send everything through the relay</label></div>
+    <div class="check"><input type="checkbox" id="routes"><label for="routes" style="margin:0;color:var(--fg);font-size:14px">Use the networks the administrator routed through a gateway member</label></div>
+    <div class="row">
+      <button class="primary" id="connect">Connect (install and start the service)</button>
+      <button id="save">Save settings only</button>
+    </div>
+    <p class="muted" id="os-hint"></p>
+  </section>
+
+  <section>
+    <h2>Export and import</h2>
+    <p class="muted">The exported file is the same format the oneq apps use. Secrets are left out unless you tick them.</p>
+    <div class="check"><input type="checkbox" id="x-pw"><label for="x-pw" style="margin:0;color:var(--fg);font-size:14px">Include the password (plain text)</label></div>
+    <div class="check"><input type="checkbox" id="x-key"><label for="x-key" style="margin:0;color:var(--fg);font-size:14px">Include this device's node key (keeps its address; moves the identity)</label></div>
+    <div class="row">
+      <button id="export">Export to file</button>
+      <button id="copy">Copy to clipboard</button>
+      <button id="import-file">Import from file…</button>
+      <button id="paste">Paste and import</button>
+      <input type="file" id="file" accept=".json,application/json" hidden>
+    </div>
+  </section>
+  <div id="note"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const note = (m, err) => { $('note').textContent = m; $('note').className = err ? 'err' : 'ok'; };
+async function api(path, body) {
+  const r = await fetch('api/' + path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+function settings() {
+  return { relays: $('relays').value.split(/[\s,]+/).filter(Boolean), community: $('community').value.trim(), user: $('user').value.trim(),
+           name: $('name').value.trim(), ca_pem: $('ca').value, force_relay: $('force').checked, accept_routes: $('routes').checked,
+           auto_start: $('auto').checked, start_hidden: !!(last && last.settings && last.settings.start_hidden) };
+}
+function fill(s) {
+  $('relays').value = (s.relays || []).join('\n'); $('community').value = s.community || ''; $('user').value = s.user || '';
+  $('name').value = s.name || ''; $('ca').value = s.ca_pem || ''; $('force').checked = !!s.force_relay; $('routes').checked = !!s.accept_routes; $('auto').checked = !!s.auto_start;
+}
+function fmt(b) { const u = ['B','KB','MB','GB']; let i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return b.toFixed(i ? 1 : 0) + ' ' + u[i]; }
+let filled = false, last = null;
+async function refresh() {
+  try {
+    const s = await api('status'); last = s;
+    if (!filled) { fill(s.settings); filled = true; $('os-hint').textContent = s.os === 'macos' ? 'Connect asks for your administrator password once (the node runs as a system service).' : s.os === 'windows' ? 'Run oneqclient ui from an elevated prompt: the node runs as a Windows service.' : 'Connect asks for administrator rights (pkexec).'; }
+    const snap = s.snapshot || {}, up = (snap.peers || []).filter(p => p.session).length;
+    let label = 'not installed', cls = '';
+    if (s.installed && !s.running) label = 'service stopped';
+    if (s.running) { label = snap.state || 'running'; cls = snap.state === 'connected' && up > 0 ? 'on' : 'mid'; }
+    $('state').textContent = label; $('badge').firstChild.className = 'dot ' + cls;
+    $('summary').textContent = s.running ? `${snap.ip || ''}/${snap.prefix || ''} · ${snap.community || ''} · MTU ${snap.mtu || ''} · relay ${snap.relay_connected ? 'connected' : 'down'} · ↑ ${fmt(snap.tx_bytes || 0)} ↓ ${fmt(snap.rx_bytes || 0)}${snap.nat_type ? ' · NAT ' + snap.nat_type + (snap.nat_public ? ' (' + snap.nat_public + ')' : '') : ''}${snap.message ? ' · ' + snap.message : ''}` : (s.installed ? 'The service is installed but not running.' : 'No service installed yet: fill in the connection and press Connect.');
+    const tb = $('peers').querySelector('tbody'); tb.replaceChildren();
+    for (const p of (s.running ? snap.peers || [] : [])) {
+      const tr = tb.insertRow(); tr.insertCell().textContent = p.name; tr.insertCell().textContent = p.ip;
+      tr.insertCell().textContent = p.session ? 'encrypted · ' + p.path : (p.online ? 'connecting' : 'offline');
+    }
+    $('peers').hidden = !s.running || !(snap.peers || []).length;
+    $('log').textContent = s.running ? (snap.log || []).slice().reverse().slice(0, 60).join('\n') : '';
+    $('stop').disabled = !s.running; $('start').disabled = !s.installed || s.running; $('uninstall').disabled = !s.installed;
+    $('x-key').parentElement.title = s.has_key ? '' : 'This device has no node key of its own yet';
+  } catch (e) { $('state').textContent = 'UI offline'; }
+}
+async function busy(btn, fn) {
+  btn.disabled = true; note('Working…');
+  try { const r = await fn(); if (r && r.message) note(r.message); } catch (e) { note(e.message, true); }
+  await refresh();
+}
+$('connect').onclick = () => busy($('connect'), () => api('connect', { settings: settings(), password: $('password').value }));
+$('save').onclick = () => busy($('save'), async () => { await api('settings', settings()); return { message: 'Saved.' }; });
+$('stop').onclick = () => busy($('stop'), () => api('service', { action: 'stop' }));
+$('start').onclick = () => busy($('start'), () => api('service', { action: 'start' }));
+$('uninstall').onclick = () => busy($('uninstall'), () => api('service', { action: 'uninstall' }));
+async function exported() {
+  const wp = $('x-pw').checked, wk = $('x-key').checked;
+  if ((wp || wk) && !confirm('The file will contain ' + [wp && 'your password in plain text', wk && "this device's node key"].filter(Boolean).join(' and ') + '. Anyone who gets it can join your network' + (wk ? ' as this device' : '') + '. Store it somewhere private.')) return null;
+  return (await api('export', { settings: settings(), with_password: wp, password: $('password').value, with_key: wk })).text;
+}
+$('export').onclick = () => busy($('export'), async () => {
+  const t = await exported(); if (t === null) return { message: 'Cancelled.' };
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([t], { type: 'application/json' })); a.download = 'oneq-settings.json'; a.click();
+  return { message: 'Exported (check your downloads).' };
+});
+$('copy').onclick = () => busy($('copy'), async () => { const t = await exported(); if (t === null) return { message: 'Cancelled.' }; await navigator.clipboard.writeText(t); return { message: 'Copied to the clipboard.' }; });
+async function importText(t) { const r = await api('import', { text: t }); fill(r.settings); if (r.password) $('password').value = r.password; return r; }
+$('import-file').onclick = () => $('file').click();
+$('file').onchange = e => { const f = e.target.files[0]; if (!f) return; if (f.size > 1048576) return note('The file is too large to be a settings file.', true); f.text().then(t => busy($('import-file'), () => importText(t))); e.target.value = ''; };
+$('paste').onclick = () => busy($('paste'), async () => importText(await navigator.clipboard.readText()));
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>

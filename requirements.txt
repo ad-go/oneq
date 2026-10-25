@@ -1,0 +1,3 @@
+# Tested versions. Python must be linked against OpenSSL >= 3.5 (ssl.OPENSSL_VERSION).
+cryptography>=50.0.2     # needs cryptography.hazmat.primitives.asymmetric.mlkem
+aiohttp>=3.14.5

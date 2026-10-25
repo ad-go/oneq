@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "oneq mesh",
+  "version": "0.0.1",
+  "description": "Opens the oneq post-quantum mesh in this browser: connects through the oneq connection manager and sends the mesh addresses (and *.oneq names) through the local proxy.",
+  "minimum_chrome_version": "110",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "oneq mesh",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "proxy",
+    "storage",
+    "alarms",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5yAhb6Zy+MG2Hru2SICW0pclLoO9vfZhQ8NxIWa6wc6cB/trukpWcv8gxouk3gvEafT9Fnc0cKO71/YSgD6X8ptN38+BHFxnKrtbXXeRdnTVv01GPtXitiP95ABWHKZSJYjZ0S6zDFUyTjePTvaKnU1ULwe8TKDpFBRNOsLTmth8GVgWTvlOq+hUEfNZY2IJd3cW2a0iPTErdrqgtc7cMtJPDdXEa2CuYNl6sTi/Ta/mtC66cxLiunAAji7j5JD85Ua1/yz6MtrGniWYlmYT+wvgEpguqmdIbIP2qFBbwIV/nZ81sxBC/mzGBzHfAZ4MJR1V2lrQSGu7XTK39UfcNQIDAQAB"
+}

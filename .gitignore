@@ -1,0 +1,54 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+# built artifacts live in their own repository (oneq-apt) or are rebuilt with packaging/build-debs.sh
+/dist/
+/repo/
+client/target/
+client/vendor/
+client/**/*.key
+!client/core/testdata/localhost.key
+client/app/build/
+client/app/.dart_tool/
+client/app/android/app/src/main/jniLibs/
+client/app/android/.gradle/
+client/app/android/local.properties
+client/macos/dist/
+client/core/Cargo.toml.orig
+client/relay/dist/
+dist-packages/
+
+# --- secrets and operator state: never commit (a key that reached the history must be treated as compromised) ---
+credentials*.json*
+*.bak
+*.bak-*
+**/ca.key
+**/gnupg/
+**/npn-ca/
+**/oneq-ca/
+**/npn-signing/
+**/oneq-signing/
+**/npn-admin-2fa/
+**/oneq-admin-2fa/
+**/*enrol*
+**/*.pass
+**/proxy.key
+**/.env
+*.p12
+*.pfx
+*.jks
+*.keystore
+**/key.properties
+id_ed25519*
+id_rsa*
+# operator working directories (bundles, logs, screenshots) are downloaded or rebuilt
+/pbs/
+/npn-apt/
+/oneq-apt/
+*.deb
+*.log
+client/dist-store/
+
+# the installers in build/ are versioned on purpose
+!/build/**/*.deb

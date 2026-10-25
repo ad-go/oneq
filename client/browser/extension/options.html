@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>oneq mesh settings</title>
+<link rel="stylesheet" href="popup.css">
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<h3>oneq mesh</h3>
+
+<section id="conn">
+  <h4>Connection</h4>
+  <p id="hostnote" class="warn" hidden></p>
+  <label for="relays">Relays (https://host:port, one per line)</label>
+  <textarea id="relays" rows="2" placeholder="https://relay.example.org:8443" spellcheck="false"></textarea>
+  <label for="community">Community</label>
+  <input type="text" id="community" autocomplete="off" spellcheck="false">
+  <label for="user">User</label>
+  <input type="text" id="user" autocomplete="off" spellcheck="false">
+  <label for="password">Password <span id="pwnote" class="muted small"></span></label>
+  <input type="password" id="password" autocomplete="new-password">
+  <label for="name">Device name (optional)</label>
+  <input type="text" id="name" autocomplete="off" spellcheck="false" placeholder="my-laptop">
+  <label for="ca">Private CA certificate, PEM (only if the relay uses one)</label>
+  <textarea id="ca" rows="3" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+  <p>
+    <button id="connect">Save and connect</button>
+    <button id="importbtn" type="button">Import settings file…</button>
+    <input type="file" id="importfile" accept=".json,application/json" hidden>
+    <span id="connmsg" class="muted"></span>
+  </p>
+  <p class="muted small">The password goes to the oneq connection manager on this computer (<code>oneqclient native-host</code>), which keeps it in a file only you can read; the extension does not store it.
+  The settings file is the one the oneq apps export (Settings, Export).</p>
+</section>
+
+<section id="adv">
+  <h4>Advanced</h4>
+  <label for="socks">SOCKS5 proxy of oneqclient</label>
+  <input type="text" id="socks" placeholder="127.0.0.1:1080">
+  <label for="status">Status page of oneqclient</label>
+  <input type="text" id="status" placeholder="127.0.0.1:1081">
+  <label for="extra">More networks to send through the proxy (one CIDR per line, optional)</label>
+  <textarea id="extra" rows="3" placeholder="10.50.0.0/24"></textarea>
+  <p class="muted small">Only addresses of the mesh (read from the running proxy) and names ending in <code>.oneq</code> use the proxy; everything else is not touched. Both addresses must be on this computer (127.x.x.x or localhost).</p>
+  <p><button id="save">Save</button> <span id="msg" class="muted"></span></p>
+</section>
+<script src="pac.js"></script>
+<script src="options.js"></script>
+</body>
+</html>
