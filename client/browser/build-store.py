@@ -22,7 +22,7 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "extension")
 LISTING = os.path.join(HERE, "store")
-GECKO_ID = "oneq-mesh@1q.ro"          # cannot be changed after the first submission to addons.mozilla.org
+GECKO_ID = "k@1q.ro"          # cannot be changed after the first submission to addons.mozilla.org
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 
 
