@@ -106,7 +106,7 @@ builds the three packages; `oneq-server` has no files of its own and depends on 
 
 ## Installing a client: examples
 
-The examples join the community `oneq` through the relays `x.1q.ro` and `y.1q.ro` as the user `alice`; replace the relays, community, user and CA file with your own.
+The examples join the community `oneq` through the relays `x.example.com` and `y.example.com` as the user `alice`; replace the relays, community, user and CA file with your own.
 The password is never given on the command line: put it alone in a file readable only by you (`PASSFILE` below) and delete the file when it is no longer needed.
 `ca.crt` is the CA that signed the relay certificates (leave `--cafile` out when they come from a public CA). `--accept-routes` is optional: it makes the networks the
 administrator routed through a gateway member reachable (for example `192.168.16.0/24`). After the first connection check the state with `oneqclient service status`
@@ -123,7 +123,7 @@ Settings and keys are kept in both cases.
 msiexec /i oneq-node-windows-x64.msi /qn /l*v install.log
 
 # a new shell picks up the PATH entry; the service runs as SYSTEM
-oneqclient service install --relay https://x.1q.ro:8443 --relay https://y.1q.ro:8443 `
+oneqclient service install --relay https://x.example.com:8443 --relay https://y.example.com:8443 `
     --community oneq --user alice --password-file C:\secretslice.pw `
     --cafile C:\secrets\ca.crt --name my-pc --accept-routes
 oneqclient service status
@@ -139,7 +139,7 @@ device), press Connect (the administrator prompt installs the service). Remove: 
 tar xzf oneq-node-macos-arm64.tar.gz        # or oneq-node-macos-x64.tar.gz
 cd oneq-macos && ./install.sh    # asks for the administrator password once; --user installs without root (no TUN node)
 
-sudo oneqclient service install --relay https://x.1q.ro:8443 --relay https://y.1q.ro:8443     --community oneq --user alice --password-file ~/alice.pw --cafile ~/ca.crt --name my-mac --accept-routes
+sudo oneqclient service install --relay https://x.example.com:8443 --relay https://y.example.com:8443     --community oneq --user alice --password-file ~/alice.pw --cafile ~/ca.crt --name my-mac --accept-routes
 sudo oneqclient service status              # launchd daemon ro.1q.oneq; the log is /Library/Application Support/oneq/client.log
 ```
 
@@ -152,7 +152,7 @@ if Gatekeeper blocks the first start, open the app with right click > Open. Remo
 sudo apt install ./oneqnode_0.0.1_amd64.deb         # node only; ./oneq-server_0.0.1_all.deb + ./oneqnode_... + ./oneqrelay_... adds the relay
 
 sudo install -m 600 /dev/null /root/alice.pw && sudoedit /root/alice.pw    # the password, alone in the file
-sudo oneqnode-init home --relay https://x.1q.ro:8443 --relay https://y.1q.ro:8443     --community oneq --user alice --password-file /root/alice.pw --cafile /root/ca.crt --label my-debian
+sudo oneqnode-init home --relay https://x.example.com:8443 --relay https://y.example.com:8443     --community oneq --user alice --password-file /root/alice.pw --cafile /root/ca.crt --label my-debian
 systemctl status oneqnode@home                      # interface oneq-home, address from the community
 ip addr show oneq-home && ping -c2 10.10.10.65
 ```
