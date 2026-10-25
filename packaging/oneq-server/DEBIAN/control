@@ -1,0 +1,14 @@
+Package: oneq-server
+Version: @VERSION@
+Architecture: all
+Maintainer: oneq <k@1q.ro>
+Installed-Size: @SIZE@
+Depends: oneqnode (= @VERSION@), oneqrelay (= @VERSION@)
+Section: net
+Priority: optional
+Description: oneq node and relay together (server install)
+ Installs the oneq node (oneqnode) and the oneq relay (oneqrelay: registry, user
+ accounts, relay and STUN service) in one step, at the same version.
+ .
+ Install oneqnode alone on a machine that only joins a mesh; oneqrelay alone on
+ a machine that only serves one.

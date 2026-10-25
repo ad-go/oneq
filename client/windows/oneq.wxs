@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows installer of oneq (WiX 5). One product family, two editions that replace each other (same UpgradeCode):
+    node    -D Relay=no    the app, oneqclient.exe (node, `proxy`, `native-host`, `relay` commands), wintun.dll
+    server  -D Relay=yes   the same plus the relay (registry, accounts, relay, STUN): the bundled Python 3.13 / OpenSSL 3.5 and the relay code
+  Built by build-msi.py:  wix build -arch x64 oneq.wxs -d AppDir=... -d Relay=no|yes -d Version=... -d ProductName=...
+  Per-machine, to %ProgramFiles%\oneq (INSTALLFOLDER can be changed on the command line), no reboot. Settings and data (ProgramData\oneq, the user's profile) are never removed.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="$(ProductName)" Manufacturer="oneq" Version="$(Version)" UpgradeCode="42C886FC-DFB3-4039-A48A-CCD673ADF965"
+           Scope="perMachine" InstallerVersion="500" Language="1033">
+    <SummaryInformation Description="$(ProductName): post-quantum mesh network" />
+    <!-- node <-> server: installing the other edition replaces this one (the same version is allowed); an older version never replaces a newer one -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of oneq is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Property Id="ARPCOMMENTS" Value="$(ProductName). Settings are kept when it is removed." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="oneq" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="MenuFolder" Name="oneq" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <?if $(Relay) = "yes" ?>
+      <Files Include="$(AppDir)\**" />
+      <?else ?>
+      <Files Include="$(AppDir)\**">
+        <Exclude Files="$(AppDir)\relay\**" />
+      </Files>
+      <?endif ?>
+    </ComponentGroup>
+
+    <!-- Start menu entry of the app -->
+    <Component Id="MenuShortcut" Directory="MenuFolder" Guid="*">
+      <Shortcut Id="AppShortcut" Name="oneq" Description="oneq mesh network" Target="[INSTALLFOLDER]oneq_app.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+      <RegistryValue Root="HKLM" Key="Software\oneq" Name="menu" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- oneqclient on the command line -->
+    <Component Id="PathEntry" Directory="INSTALLFOLDER" Guid="*">
+      <Environment Id="PathOneq" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" Permanent="no" />
+      <RegistryValue Root="HKLM" Key="Software\oneq" Name="path" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- On removal (not on an upgrade or an edition switch): take the background services out of the service manager before the files go.
+         oneqclient.exe knows how to do it; a service that was never installed is not an error. The configuration and the data stay. -->
+    <CustomAction Id="RemoveNodeService" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]oneqclient.exe&quot; service uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="RemoveRelayService" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]oneqclient.exe&quot; relay uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveNodeService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <?if $(Relay) = "yes" ?>
+      <Custom Action="RemoveRelayService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <?endif ?>
+    </InstallExecuteSequence>
+
+    <Feature Id="Main" Title="$(ProductName)" Level="1" AllowAbsent="no" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="MenuShortcut" />
+      <Feature Id="PathFeature" Title="Add oneqclient to the PATH" Level="1" AllowAbsent="yes">
+        <ComponentRef Id="PathEntry" />
+      </Feature>
+    </Feature>
+  </Package>
+</Wix>

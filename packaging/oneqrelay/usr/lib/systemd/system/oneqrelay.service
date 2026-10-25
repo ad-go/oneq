@@ -1,0 +1,41 @@
+[Unit]
+Description=oneqrelay: federated registry and relay for the oneq mesh
+Documentation=file:///usr/share/doc/oneqrelay/README.Debian
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/oneq/relay.conf
+
+[Service]
+Type=simple
+User=oneqrelay
+Group=oneqrelay
+StateDirectory=oneq/relay
+StateDirectoryMode=0700
+# Everything comes from /etc/oneq/relay.conf; the federation secret is a plain file owned by the service user
+# (no LoadCredential, which does not work inside containers).
+ExecStart=/opt/oneq/relay/bin/run
+Restart=on-failure
+RestartSec=3
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

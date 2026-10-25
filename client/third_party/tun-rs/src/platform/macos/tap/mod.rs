@@ -1,0 +1,553 @@
+/*
+link https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/sockio.h
+link https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/if_fake.c
+link https://www.zerotier.com/blog/how-zerotier-eliminated-kernel-extensions-on-macos/
+ */
+/*
+* link https://github.com/zerotier/ZeroTierOne/blob/dev/osdep/MacEthernetTapAgent.c
+*
+* This creates a pair of feth devices with the lower numbered device
+* being the virtual interface and the other being the device
+* used to actually read and write packets. The latter gets no IP config
+* and is only used for I/O. The behavior of feth is similar to the
+* veth pairs that exist on Linux.
+*
+* The feth device has only existed since MacOS Sierra, but that's fairly
+* long ago in Mac terms.
+*
+* I/O with feth must be done using two different sockets. The BPF socket
+* is used to receive packets, while an AF_NDRV (low-level network driver
+* access) socket must be used to inject. AF_NDRV can't read IP frames
+* since BSD doesn't forward packets out the NDRV tap if they've already
+* been handled, and while BPF can inject its MTU for injected packets
+* is limited to 2048.
+*
+* All this stuff is basically undocumented. A lot of tracing through
+* the Darwin/XNU kernel source was required to figure out how to make
+* this actually work.
+﻿
+*
+* See also:
+*
+* https://apple.stackexchange.com/questions/337715/fake-ethernet-interfaces-feth-if-fake-anyone-ever-seen-this
+*
+*/
+use crate::builder::DeviceConfig;
+use crate::platform::macos::sys::siocifcreate;
+use crate::platform::unix::Fd;
+use bytes::buf::UninitSlice;
+use bytes::BytesMut;
+use libc::{ifreq, IFNAMSIZ};
+use nix::errno::Errno;
+use std::collections::VecDeque;
+use std::ffi::{CStr, CString};
+use std::io;
+use std::io::{IoSlice, IoSliceMut};
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use std::sync::Mutex;
+
+const FETH: &str = "feth";
+const BUFFER_LEN: usize = 131072;
+const BPF_HDR_SIZE: usize = std::mem::size_of::<libc::bpf_hdr>();
+
+#[inline]
+fn next_bpf_step(bh_hdrlen: usize, bh_caplen: usize) -> Option<usize> {
+    let step = (bh_hdrlen + bh_caplen + 3) & !3;
+    (step >= BPF_HDR_SIZE).then_some(step)
+}
+
+pub(crate) fn run_command(command: &str, args: &[&str]) -> io::Result<()> {
+    let out = std::process::Command::new(command).args(args).output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(if out.stderr.is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        });
+        let info = format!("{command} failed with: \"{err}\"");
+        return Err(io::Error::other(info));
+    }
+    Ok(())
+}
+
+pub struct Tap {
+    s_bpf_fd: Fd,
+    s_ndrv_fd: Fd,
+    peer_feth: Feth,
+    dev_feth: Feth,
+    buffer: Mutex<VecDeque<BytesMut>>,
+}
+struct Feth {
+    is_drop: bool,
+    name: String,
+}
+impl Drop for Feth {
+    fn drop(&mut self) {
+        if self.is_drop {
+            _ = run_command("ifconfig", &[&self.name, "destroy"]);
+            self.is_drop = false;
+        }
+    }
+}
+impl IntoRawFd for Tap {
+    fn into_raw_fd(mut self) -> RawFd {
+        self.peer_feth.is_drop = false;
+        self.dev_feth.is_drop = false;
+        self.s_bpf_fd.into_raw_fd()
+    }
+}
+impl Tap {
+    pub fn new(config: &DeviceConfig) -> io::Result<Tap> {
+        unsafe {
+            let s_ndrv_fd = libc::socket(libc::AF_NDRV, libc::SOCK_RAW, 0);
+            let s_ndrv_fd = Fd::new(s_ndrv_fd)?;
+            s_ndrv_fd.set_cloexec()?;
+            let mut ifr = new_ifreq(config.dev_name.as_ref())?;
+            if let Err(e) = siocifcreate(s_ndrv_fd.inner, &mut ifr) {
+                if e != Errno::EEXIST || !config.reuse_dev.unwrap_or(true) {
+                    return Err(e.into());
+                }
+            }
+
+            let dev_name = CStr::from_ptr(ifr.ifr_name.as_ptr())
+                .to_string_lossy()
+                .into_owned();
+            let dev_feth = Feth {
+                is_drop: !config.persist.unwrap_or(false),
+                name: dev_name,
+            };
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            let mut peer_ifr = new_ifreq(config.peer_feth.as_ref())?;
+            if let Err(e) = siocifcreate(s_ndrv_fd.inner, &mut peer_ifr) {
+                if e != Errno::EEXIST || !config.reuse_dev.unwrap_or(true) {
+                    return Err(e.into());
+                }
+            }
+            let peer_name = CStr::from_ptr(peer_ifr.ifr_name.as_ptr())
+                .to_string_lossy()
+                .into_owned();
+            let peer_feth = Feth {
+                is_drop: !config.persist.unwrap_or(false),
+                name: peer_name,
+            };
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            run_command("ifconfig", &[&peer_feth.name, "peer", &dev_feth.name])?;
+            let mut nd: libc::sockaddr_ndrv = std::mem::zeroed();
+            nd.snd_len = size_of::<libc::sockaddr_ndrv>() as u8;
+            nd.snd_family = libc::AF_NDRV as u8;
+            // Ensure the name fits within snd_name to prevent buffer overflow
+            let name_bytes = peer_feth.name.as_bytes();
+            if name_bytes.len() > nd.snd_name.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Interface name '{}' is too long (max {} bytes)",
+                        peer_feth.name,
+                        nd.snd_name.len()
+                    ),
+                ));
+            }
+            nd.snd_name[..name_bytes.len()].copy_from_slice(name_bytes);
+            if libc::bind(
+                s_ndrv_fd.inner,
+                &nd as *const _ as *const libc::sockaddr,
+                size_of::<libc::sockaddr_ndrv>() as u32,
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::connect(
+                s_ndrv_fd.inner,
+                &nd as *const _ as *const libc::sockaddr,
+                size_of::<libc::sockaddr_ndrv>() as u32,
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let s_bpf_fd = open_bpf()?;
+            let mut buffer_len = BUFFER_LEN;
+            let rs = libc::ioctl(s_bpf_fd.inner, libc::BIOCSBLEN, &mut buffer_len);
+            if rs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut enable = 1i32;
+            let mut disable = 0i32;
+            let rs = libc::ioctl(s_bpf_fd.inner, libc::BIOCIMMEDIATE, &mut enable);
+            if rs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let rs = libc::ioctl(s_bpf_fd.inner, libc::BIOCSSEESENT, &mut disable);
+            if rs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let rs = libc::ioctl(s_bpf_fd.inner, libc::BIOCSETIF, &mut peer_ifr);
+            if rs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let rs = libc::ioctl(s_bpf_fd.inner, libc::BIOCSHDRCMPLT, &mut enable);
+            if rs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let rs = libc::ioctl(s_bpf_fd.inner, libc::BIOCPROMISC as u64, &mut enable);
+            if rs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                s_bpf_fd,
+                s_ndrv_fd,
+                dev_feth,
+                peer_feth,
+                buffer: Default::default(),
+            })
+        }
+    }
+    // pub fn as_s_ndrv_fd(&self) -> RawFd {
+    //     self.s_ndrv_fd.as_raw_fd()
+    // }
+    // pub fn as_s_bpf_fd(&self) -> RawFd {
+    //     self.s_bpf_fd.as_raw_fd()
+    // }
+    pub fn name(&self) -> &String {
+        &self.dev_feth.name
+    }
+    pub fn peer_name(&self) -> &String {
+        &self.peer_feth.name
+    }
+    pub fn is_nonblocking(&self) -> io::Result<bool> {
+        self.s_bpf_fd.is_nonblocking()
+    }
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.s_bpf_fd.set_nonblocking(nonblocking)?;
+        self.s_ndrv_fd.set_nonblocking(nonblocking)?;
+        Ok(())
+    }
+    #[cfg(any(feature = "async_io", feature = "async_tokio"))]
+    #[inline]
+    pub(crate) fn writable_fd(&self) -> RawFd {
+        self.s_ndrv_fd.as_raw_fd()
+    }
+    #[inline]
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.s_ndrv_fd.write(buf)
+    }
+    #[inline]
+    pub fn send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.s_ndrv_fd.writev(bufs)
+    }
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut guard = self.buffer.lock().unwrap();
+        if guard.is_empty() {
+            self.recv_to_buffer(&mut guard)?;
+        }
+
+        let Some(buffer) = guard.pop_front() else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "recv buffer is empty",
+            ));
+        };
+        if buf.len() < buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "buffer too small",
+            ));
+        }
+        buf[..buffer.len()].copy_from_slice(&buffer);
+        Ok(buffer.len())
+    }
+    pub fn recv_uninit(&self, buf: &mut UninitSlice) -> io::Result<usize> {
+        let mut guard = self.buffer.lock().unwrap();
+        if guard.is_empty() {
+            self.recv_to_buffer(&mut guard)?;
+        }
+
+        let Some(buffer) = guard.pop_front() else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "recv buffer is empty",
+            ));
+        };
+        if buf.len() < buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "buffer too small",
+            ));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(buffer.as_ptr(), buf.as_mut_ptr(), buffer.len());
+        }
+        Ok(buffer.len())
+    }
+    fn recv_to_buffer(&self, bufs: &mut VecDeque<BytesMut>) -> io::Result<()> {
+        let mut buffer = [0; BUFFER_LEN];
+        let len = self.s_bpf_fd.read(&mut buffer)?;
+        if len > 0 {
+            let mut p = 0;
+            while p < len {
+                let remaining_bytes = len - p;
+                if remaining_bytes < BPF_HDR_SIZE {
+                    break;
+                }
+                // SAFETY: We use read_unaligned to avoid UB from misaligned access.
+                // buffer is [u8] (alignment 1) but bpf_hdr requires alignment.
+                let hdr: libc::bpf_hdr = unsafe {
+                    std::ptr::read_unaligned(buffer.as_ptr().add(p) as *const libc::bpf_hdr)
+                };
+                let bh_caplen = hdr.bh_caplen as usize;
+                let bh_hdrlen = hdr.bh_hdrlen as usize;
+                if bh_caplen > 0 && p + bh_hdrlen + bh_caplen <= len {
+                    let buf = &buffer[p + bh_hdrlen..p + bh_hdrlen + bh_caplen];
+                    bufs.push_back(buf.into());
+                }
+                let Some(step) = next_bpf_step(bh_hdrlen, bh_caplen) else {
+                    break;
+                };
+                p += step;
+            }
+        }
+        Ok(())
+    }
+    #[allow(dead_code)]
+    pub fn recv_multiple<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        bufs: &mut [B],
+        sizes: &mut [usize],
+    ) -> io::Result<usize> {
+        if bufs.is_empty() || sizes.len() < bufs.len() {
+            return Err(io::Error::other("sizes must be at least as long as bufs"));
+        }
+        let mut buffer = [0; BUFFER_LEN];
+        let len = self.s_bpf_fd.read(&mut buffer)?;
+        let mut num = 0;
+        if len > 0 {
+            let mut p = 0;
+            while p < len {
+                let remaining_bytes = len - p;
+                if remaining_bytes < BPF_HDR_SIZE {
+                    break;
+                }
+                // SAFETY: We use read_unaligned to avoid UB from misaligned access.
+                let hdr: libc::bpf_hdr = unsafe {
+                    std::ptr::read_unaligned(buffer.as_ptr().add(p) as *const libc::bpf_hdr)
+                };
+                let bh_caplen = hdr.bh_caplen as usize;
+                let bh_hdrlen = hdr.bh_hdrlen as usize;
+                if bh_caplen > 0 && p + bh_hdrlen + bh_caplen <= len {
+                    let buf = &buffer[p + bh_hdrlen..p + bh_hdrlen + bh_caplen];
+                    if let Some(dst) = bufs.get_mut(num) {
+                        let dst = dst.as_mut();
+                        if dst.len() < buf.len() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "buffer too small",
+                            ));
+                        }
+                        dst[..buf.len()].copy_from_slice(buf);
+                        sizes[num] = buf.len();
+                        num += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let Some(step) = next_bpf_step(bh_hdrlen, bh_caplen) else {
+                    break;
+                };
+                p += step;
+            }
+        }
+        Ok(num)
+    }
+    pub fn recv_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        let mut guard = self.buffer.lock().unwrap();
+        if guard.is_empty() {
+            self.recv_to_buffer(&mut guard)?;
+        }
+
+        let Some(buf) = guard.pop_front() else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "recv buffer is empty",
+            ));
+        };
+        let len: usize = bufs.iter().map(|v| v.len()).sum();
+        if len < buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "buffer too small",
+            ));
+        }
+        let mut pos = 0;
+        for b in bufs {
+            let n = b.len().min(buf.len() - pos);
+            if n == 0 {
+                break;
+            }
+            b[..n].copy_from_slice(&buf[pos..pos + n]);
+            pos += n;
+            if pos == buf.len() {
+                break;
+            }
+        }
+        Ok(pos)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn read_interruptible(
+        &self,
+        buf: &mut [u8],
+        event: &crate::InterruptEvent,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<usize> {
+        let started = std::time::Instant::now();
+        loop {
+            self.wait_readable_interruptible(
+                event,
+                timeout.map(|limit| limit.saturating_sub(started.elapsed())),
+            )?;
+            match self.recv(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if timeout
+                        .map(|limit| started.elapsed() >= limit)
+                        .unwrap_or(false)
+                    {
+                        return Err(io::Error::from(io::ErrorKind::TimedOut));
+                    }
+                }
+                rs => return rs,
+            }
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn readv_interruptible(
+        &self,
+        bufs: &mut [IoSliceMut<'_>],
+        event: &crate::InterruptEvent,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<usize> {
+        let started = std::time::Instant::now();
+        loop {
+            self.wait_readable_interruptible(
+                event,
+                timeout.map(|limit| limit.saturating_sub(started.elapsed())),
+            )?;
+            match self.recv_vectored(bufs) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if timeout
+                        .map(|limit| started.elapsed() >= limit)
+                        .unwrap_or(false)
+                    {
+                        return Err(io::Error::from(io::ErrorKind::TimedOut));
+                    }
+                }
+                rs => return rs,
+            }
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn wait_readable_interruptible(
+        &self,
+        event: &crate::InterruptEvent,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<()> {
+        self.s_bpf_fd.wait_readable(Some(event), timeout)
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn write_interruptible(
+        &self,
+        buf: &[u8],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        loop {
+            self.wait_writable_interruptible(event)?;
+            return match self.s_ndrv_fd.write(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                rs => rs,
+            };
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn writev_interruptible(
+        &self,
+        bufs: &[IoSlice<'_>],
+        event: &crate::InterruptEvent,
+    ) -> io::Result<usize> {
+        loop {
+            self.wait_writable_interruptible(event)?;
+            return match self.s_ndrv_fd.writev(bufs) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                rs => rs,
+            };
+        }
+    }
+    #[cfg(feature = "interruptible")]
+    #[inline]
+    pub(crate) fn wait_writable_interruptible(
+        &self,
+        event: &crate::InterruptEvent,
+    ) -> io::Result<()> {
+        self.s_ndrv_fd.wait_writable(Some(event), None)
+    }
+}
+impl AsRawFd for Tap {
+    fn as_raw_fd(&self) -> RawFd {
+        self.s_bpf_fd.as_raw_fd()
+    }
+}
+
+fn open_bpf() -> io::Result<Fd> {
+    for i in 1..5000 {
+        let path = CString::new(format!("/dev/bpf{i}").into_bytes())?;
+        let bpf_fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
+        match Fd::new(bpf_fd) {
+            Ok(fd) => {
+                fd.set_cloexec()?;
+                return Ok(fd);
+            }
+            Err(e) => {
+                if e.raw_os_error() == Some(libc::EBUSY) {
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No available /dev/bpf",
+    ))
+}
+fn new_ifreq(name: Option<&String>) -> io::Result<ifreq> {
+    if let Some(name) = name {
+        new_ifreq_str(name.as_str())
+    } else {
+        new_ifreq_str(FETH)
+    }
+}
+fn new_ifreq_str(name: &str) -> io::Result<ifreq> {
+    let bytes = name.as_bytes();
+    if bytes.len() >= IFNAMSIZ {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "name too long"));
+    }
+    if bytes.len() < 4 || &bytes[..4] != FETH.as_bytes() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "The prefix of the network card name must be 'feth'",
+        ));
+    }
+    let mut ifr: ifreq = unsafe { std::mem::zeroed() };
+    for (i, &b) in bytes.iter().enumerate() {
+        ifr.ifr_name[i] = b as libc::c_char;
+    }
+    ifr.ifr_name[bytes.len()] = 0;
+    Ok(ifr)
+}

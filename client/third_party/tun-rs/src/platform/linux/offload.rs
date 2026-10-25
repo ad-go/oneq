@@ -1,0 +1,2838 @@
+/*!
+# Linux Offload Support Module
+
+This module provides Generic Receive Offload (GRO) and Generic Segmentation Offload (GSO)
+support for Linux TUN devices, significantly improving throughput for TCP and UDP traffic.
+
+## Overview
+
+Modern network cards and drivers use offload techniques to reduce CPU overhead:
+
+- **GSO (Generic Segmentation Offload)**: Allows sending large packets that are segmented by
+  the kernel/driver, reducing per-packet processing overhead.
+
+- **GRO (Generic Receive Offload)**: Coalesces multiple received packets into larger segments,
+  reducing the number of packets passed to the application.
+
+This module implements GRO/GSO for TUN devices using the `virtio_net` header format, compatible
+with the Linux kernel's TUN/TAP driver offload capabilities.
+
+## Performance Benefits
+
+Enabling offload can provide:
+- 2-10x improvement in throughput for TCP traffic
+- Reduced CPU usage per gigabit of traffic
+- Better handling of high-bandwidth applications
+
+The actual improvement depends on:
+- Packet sizes
+- TCP window sizes
+- Network round-trip time
+- CPU capabilities
+
+## Usage
+
+Enable offload when building a device:
+
+```no_run
+# #[cfg(target_os = "linux")]
+# {
+use tun_rs::{DeviceBuilder, GROTable, IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
+
+let dev = DeviceBuilder::new()
+    .offload(true)  // Enable offload
+    .ipv4("10.0.0.1", 24, None)
+    .build_sync()?;
+
+// Allocate buffers for batch operations
+let mut original_buffer = vec![0; VIRTIO_NET_HDR_LEN + 65535];
+let mut bufs = vec![vec![0u8; 1500]; IDEAL_BATCH_SIZE];
+let mut sizes = vec![0; IDEAL_BATCH_SIZE];
+
+// Create GRO table for coalescing
+let mut gro_table = GROTable::default();
+
+loop {
+    // Receive multiple packets at once
+    let num = dev.recv_multiple(&mut original_buffer, &mut bufs, &mut sizes, 0)?;
+
+    for i in 0..num {
+        // Process each packet
+        println!("Packet {}: {} bytes", i, sizes[i]);
+    }
+}
+# }
+# Ok::<(), std::io::Error>(())
+```
+
+## Key Types
+
+- [`VirtioNetHdr`]: Header structure for virtio network offload
+- [`GROTable`]: Manages TCP and UDP flow coalescing for GRO
+- [`TcpGROTable`]: TCP-specific GRO state
+- [`UdpGROTable`]: UDP-specific GRO state
+
+## Key Functions
+
+- [`handle_gro`]: Process received packets and perform GRO coalescing
+- [`gso_split`]: Split a GSO packet into multiple segments
+- [`apply_tcp_coalesce_accounting`]: Update TCP headers after coalescing
+
+## Constants
+
+- [`VIRTIO_NET_HDR_LEN`]: Size of the virtio network header (12 bytes)
+- [`IDEAL_BATCH_SIZE`]: Recommended batch size for packet operations (128)
+- [`VIRTIO_NET_HDR_GSO_NONE`], [`VIRTIO_NET_HDR_GSO_TCPV4`], etc.: GSO type constants
+
+## References
+
+- [Linux virtio_net.h](https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_net.h)
+- [WireGuard-go offload implementation](https://github.com/WireGuard/wireguard-go/blob/master/tun/offload_linux.go)
+
+## Platform Requirements
+
+- Linux kernel with TUN/TAP driver
+- Kernel support for IFF_VNET_HDR (available since Linux 2.6.32)
+- Root privileges to create TUN devices with offload enabled
+*/
+
+/// https://github.com/WireGuard/wireguard-go/blob/master/tun/offload_linux.go
+use crate::platform::linux::checksum::{checksum, pseudo_header_checksum_no_fold};
+use bytes::BytesMut;
+use libc::{IPPROTO_TCP, IPPROTO_UDP};
+use std::hash::{BuildHasher, Hash};
+use std::io;
+
+const GRO_FLOW_TABLE_SLOTS: usize = IDEAL_BATCH_SIZE * 2;
+
+trait GroFlowKey: Copy + Eq + Hash {}
+
+impl<T: Copy + Eq + Hash> GroFlowKey for T {}
+
+enum GroLookup {
+    Occupied(usize),
+    Vacant(usize),
+    Full,
+}
+
+struct GroFlowTable<K, I, S = ahash::RandomState> {
+    slots: Vec<Option<(K, Vec<I>)>>,
+    occupied: Vec<usize>,
+    items_pool: Vec<Vec<I>>,
+    hash_builder: S,
+}
+
+impl<K: GroFlowKey, I> GroFlowTable<K, I> {
+    fn new() -> Self {
+        Self::with_hasher(ahash::RandomState::new())
+    }
+}
+
+impl<K: GroFlowKey, I, S: BuildHasher> GroFlowTable<K, I, S> {
+    fn empty_slots(count: usize) -> Vec<Option<(K, Vec<I>)>> {
+        let mut slots = Vec::with_capacity(count);
+        slots.resize_with(count, || None);
+        slots
+    }
+
+    fn with_hasher(hash_builder: S) -> Self {
+        debug_assert!(GRO_FLOW_TABLE_SLOTS.is_power_of_two());
+        let mut items_pool = Vec::with_capacity(IDEAL_BATCH_SIZE);
+        for _ in 0..IDEAL_BATCH_SIZE {
+            items_pool.push(Vec::with_capacity(IDEAL_BATCH_SIZE));
+        }
+        Self {
+            slots: Self::empty_slots(GRO_FLOW_TABLE_SLOTS),
+            occupied: Vec::with_capacity(IDEAL_BATCH_SIZE),
+            items_pool,
+            hash_builder,
+        }
+    }
+
+    fn find(&self, key: K) -> GroLookup {
+        let mask = self.slots.len() - 1;
+        let start = self.hash_builder.hash_one(key) as usize & mask;
+        for probe in 0..self.slots.len() {
+            let index = (start + probe) & mask;
+            match &self.slots[index] {
+                Some((existing, _)) if *existing == key => return GroLookup::Occupied(index),
+                Some(_) => {}
+                None => return GroLookup::Vacant(index),
+            }
+        }
+        GroLookup::Full
+    }
+
+    fn occupied_mut(&mut self, index: usize) -> &mut Vec<I> {
+        &mut self.slots[index]
+            .as_mut()
+            .expect("occupied GRO slot disappeared")
+            .1
+    }
+
+    fn at_insert_load_limit(&self) -> bool {
+        self.occupied.len() >= self.slots.len() * 3 / 4
+    }
+
+    fn lookup_or_insert_with(
+        &mut self,
+        key: K,
+        make_item: impl FnOnce() -> I,
+    ) -> Option<&mut Vec<I>> {
+        let index = loop {
+            match self.find(key) {
+                GroLookup::Occupied(index) => return Some(self.occupied_mut(index)),
+                GroLookup::Vacant(index) if !self.at_insert_load_limit() => break index,
+                GroLookup::Vacant(_) | GroLookup::Full => self.grow(),
+            }
+        };
+        let mut items = self.items_pool.pop().unwrap_or_default();
+        items.push(make_item());
+        self.slots[index] = Some((key, items));
+        self.occupied.push(index);
+        None
+    }
+
+    fn grow(&mut self) {
+        let new_len = self
+            .slots
+            .len()
+            .checked_mul(2)
+            .expect("GRO flow table capacity overflow");
+        let old_slots = std::mem::replace(&mut self.slots, Self::empty_slots(new_len));
+        self.occupied.clear();
+        for entry in old_slots.into_iter().flatten() {
+            let GroLookup::Vacant(index) = self.find(entry.0) else {
+                unreachable!("freshly grown GRO flow table must have a vacant slot");
+            };
+            self.slots[index] = Some(entry);
+            self.occupied.push(index);
+        }
+    }
+
+    fn insert(&mut self, key: K, item: I) {
+        let index = loop {
+            match self.find(key) {
+                GroLookup::Occupied(index) => break index,
+                GroLookup::Vacant(index) if !self.at_insert_load_limit() => break index,
+                GroLookup::Vacant(_) | GroLookup::Full => self.grow(),
+            }
+        };
+        if self.slots[index].is_none() {
+            let items = self.items_pool.pop().unwrap_or_default();
+            self.slots[index] = Some((key, items));
+            self.occupied.push(index);
+        }
+        if let Some((_, items)) = &mut self.slots[index] {
+            items.push(item);
+        }
+    }
+
+    fn reset(&mut self) {
+        for index in self.occupied.drain(..) {
+            if let Some((_, mut items)) = self.slots[index].take() {
+                items.clear();
+                self.items_pool.push(items);
+            }
+        }
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Vec<I>> {
+        self.occupied
+            .iter()
+            .filter_map(|&index| self.slots[index].as_ref().map(|(_, items)| items))
+    }
+}
+
+#[inline]
+fn read_be_u16(bytes: &[u8]) -> u16 {
+    u16::from_be_bytes([bytes[0], bytes[1]])
+}
+
+#[inline]
+fn read_be_u32(bytes: &[u8]) -> u32 {
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+#[inline]
+fn write_be_u16(bytes: &mut [u8], value: u16) {
+    bytes[..2].copy_from_slice(&value.to_be_bytes());
+}
+
+#[inline]
+fn write_be_u32(bytes: &mut [u8], value: u32) {
+    bytes[..4].copy_from_slice(&value.to_be_bytes());
+}
+
+/// GSO type: Not a GSO frame (normal packet).
+///
+/// This indicates a regular packet without Generic Segmentation Offload applied.
+/// See: <https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_net.h>
+pub const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
+
+/// Flag: Use csum_start and csum_offset fields for checksum calculation.
+///
+/// When this flag is set, the packet requires checksum calculation.
+/// The `csum_start` field indicates where checksumming should begin,
+/// and `csum_offset` indicates where to write the checksum.
+pub const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+
+/// GSO type: IPv4 TCP segmentation (TSO - TCP Segmentation Offload).
+///
+/// Large TCP packets can be sent and will be segmented by the kernel/driver.
+pub const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+
+/// GSO type: IPv6 TCP segmentation (TSO).
+///
+/// Similar to TCPV4 but for IPv6 packets.
+pub const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
+
+/// GSO type: UDP segmentation for IPv4 and IPv6 (USO - UDP Segmentation Offload).
+///
+/// Available in newer Linux kernels for UDP packet segmentation.
+pub const VIRTIO_NET_HDR_GSO_UDP_L4: u8 = 5;
+
+/// Flag combined with a TCP GSO type when Explicit Congestion Notification is active.
+///
+/// Linux masks this bit before identifying the base GSO type and maps it to
+/// SKB_GSO_TCP_ECN. It is not a standalone GSO type.
+pub const VIRTIO_NET_HDR_GSO_ECN: u8 = 0x80;
+
+/// Recommended batch size for packet operations with offload.
+///
+/// This constant defines the optimal number of packets to handle per `recv_multiple`
+/// or `send_multiple` call. It balances between:
+/// - Amortizing system call overhead
+/// - Keeping latency reasonable
+/// - Memory usage for packet buffers
+///
+/// Based on WireGuard-go's implementation.
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::IDEAL_BATCH_SIZE;
+///
+/// // Allocate buffers for batch operations
+/// let mut bufs = vec![vec![0u8; 1500]; IDEAL_BATCH_SIZE];
+/// let mut sizes = vec![0; IDEAL_BATCH_SIZE];
+/// # }
+/// ```
+///
+/// See: <https://github.com/WireGuard/wireguard-go/blob/master/conn/conn.go#L19>
+pub const IDEAL_BATCH_SIZE: usize = 128;
+
+const TCP_FLAGS_OFFSET: usize = 13;
+
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
+const TCP_FLAG_CWR: u8 = 0x80;
+
+/// Virtio network header for offload support.
+///
+/// This structure precedes each packet when offload is enabled on a Linux TUN device.
+/// It provides metadata about Generic Segmentation Offload (GSO) and checksum requirements,
+/// allowing the kernel to perform hardware-accelerated operations.
+///
+/// The header matches the Linux kernel's `virtio_net_hdr` structure defined in
+/// `include/uapi/linux/virtio_net.h`.
+///
+/// # Memory Layout
+///
+/// The structure is `#[repr(C)]` and has a fixed size of 12 bytes ([`VIRTIO_NET_HDR_LEN`]).
+/// All multi-byte fields are in native endianness.
+///
+/// # Usage
+///
+/// When reading from a TUN device with offload enabled:
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
+///
+/// let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 1500];
+/// // let n = dev.recv(&mut buf)?;
+///
+/// // Decode the header
+/// // let hdr = VirtioNetHdr::decode(&buf[..VIRTIO_NET_HDR_LEN])?;
+/// // let packet = &buf[VIRTIO_NET_HDR_LEN..n];
+/// # }
+/// ```
+///
+/// # Fields
+///
+/// - `flags`: Bit flags for header processing (e.g., [`VIRTIO_NET_HDR_F_NEEDS_CSUM`])
+/// - `gso_type`: Type of GSO applied (e.g., [`VIRTIO_NET_HDR_GSO_TCPV4`])
+/// - `hdr_len`: Length of packet headers (Ethernet + IP + TCP/UDP)
+/// - `gso_size`: Maximum segment size for GSO
+/// - `csum_start`: Offset to start checksum calculation
+/// - `csum_offset`: Offset within checksum area to store the checksum
+///
+/// # References
+///
+/// - [Linux virtio_net.h](https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_net.h)
+///
+/// See: <https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_net.h>
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VirtioNetHdr {
+    // #define VIRTIO_NET_HDR_F_NEEDS_CSUM	1	/* Use csum_start, csum_offset */
+    // #define VIRTIO_NET_HDR_F_DATA_VALID	2	/* Csum is valid */
+    // #define VIRTIO_NET_HDR_F_RSC_INFO	4	/* rsc info in csum_ fields */
+    pub flags: u8,
+    // #define VIRTIO_NET_HDR_GSO_NONE		0	/* Not a GSO frame */
+    // #define VIRTIO_NET_HDR_GSO_TCPV4	1	/* GSO frame, IPv4 TCP (TSO) */
+    // #define VIRTIO_NET_HDR_GSO_UDP		3	/* GSO frame, IPv4 UDP (UFO) */
+    // #define VIRTIO_NET_HDR_GSO_TCPV6	4	/* GSO frame, IPv6 TCP */
+    // #define VIRTIO_NET_HDR_GSO_UDP_L4	5	/* GSO frame, IPv4& IPv6 UDP (USO) */
+    // #define VIRTIO_NET_HDR_GSO_ECN		0x80	/* TCP has ECN set */
+    pub gso_type: u8,
+    // Ethernet + IP + tcp/udp hdrs
+    pub hdr_len: u16,
+    // Bytes to append to hdr_len per frame
+    pub gso_size: u16,
+    // Checksum calculation
+    pub csum_start: u16,
+    pub csum_offset: u16,
+}
+
+impl VirtioNetHdr {
+    /// Decode a virtio network header from a byte buffer.
+    ///
+    /// Reads the first [`VIRTIO_NET_HDR_LEN`] bytes from the buffer and interprets
+    /// them as a `VirtioNetHdr` structure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer is too short (less than [`VIRTIO_NET_HDR_LEN`] bytes).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(target_os = "linux")]
+    /// # {
+    /// use tun_rs::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
+    ///
+    /// let buffer = vec![0u8; VIRTIO_NET_HDR_LEN + 1500];
+    /// let header = VirtioNetHdr::decode(&buffer)?;
+    /// println!("GSO type: {:?}", header.gso_type);
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn decode(buf: &[u8]) -> io::Result<VirtioNetHdr> {
+        if buf.len() < VIRTIO_NET_HDR_LEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "too short"));
+        }
+        let mut hdr = std::mem::MaybeUninit::<VirtioNetHdr>::uninit();
+        unsafe {
+            // Safety:
+            // hdr is written by `buf`, both pointers satisfy the alignment requirement of `u8`
+            std::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                hdr.as_mut_ptr() as *mut _,
+                std::mem::size_of::<VirtioNetHdr>(),
+            );
+            Ok(hdr.assume_init())
+        }
+    }
+
+    /// Encode a virtio network header into a byte buffer.
+    ///
+    /// Writes this header into the first [`VIRTIO_NET_HDR_LEN`] bytes of the buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer is too short (less than [`VIRTIO_NET_HDR_LEN`] bytes).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(target_os = "linux")]
+    /// # {
+    /// use tun_rs::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
+    ///
+    /// let header = VirtioNetHdr::default();
+    ///
+    /// let mut buffer = vec![0u8; VIRTIO_NET_HDR_LEN + 1500];
+    /// header.encode(&mut buffer)?;
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn encode(&self, buf: &mut [u8]) -> io::Result<()> {
+        if buf.len() < VIRTIO_NET_HDR_LEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "too short"));
+        }
+        unsafe {
+            let hdr_ptr = self as *const VirtioNetHdr as *const u8;
+            std::ptr::copy_nonoverlapping(hdr_ptr, buf.as_mut_ptr(), VIRTIO_NET_HDR_LEN);
+            Ok(())
+        }
+    }
+}
+
+/// Size of the virtio network header in bytes (12 bytes).
+///
+/// This constant represents the fixed size of the `VirtioNetHdr` structure.
+/// When offload is enabled on a TUN device, this header precedes every packet.
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::VIRTIO_NET_HDR_LEN;
+///
+/// // Allocate buffer with space for header + packet
+/// let mut buffer = vec![0u8; VIRTIO_NET_HDR_LEN + 1500];
+///
+/// // Header is at the start
+/// // let header_bytes = &buffer[..VIRTIO_NET_HDR_LEN];
+/// // Packet data follows the header
+/// // let packet_data = &buffer[VIRTIO_NET_HDR_LEN..];
+/// # }
+/// ```
+pub const VIRTIO_NET_HDR_LEN: usize = std::mem::size_of::<VirtioNetHdr>();
+
+/// Identifier for a TCP flow used in Generic Receive Offload (GRO).
+///
+/// This structure uniquely identifies a TCP connection for packet coalescing.
+/// Packets belonging to the same flow can be coalesced into larger segments,
+/// reducing per-packet processing overhead.
+///
+/// # Fields
+///
+/// The flow is identified by:
+/// - Source and destination IP addresses (IPv4 or IPv6)
+/// - Source and destination ports
+/// - TCP acknowledgment number (to avoid coalescing segments with different ACKs)
+/// - IP version flag
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct TcpFlowKey {
+    src_addr: [u8; 16],
+    dst_addr: [u8; 16],
+    src_port: u16,
+    dst_port: u16,
+    rx_ack: u32, // varying ack values should not be coalesced. Treat them as separate flows.
+    is_v6: bool,
+}
+
+/// TCP Generic Receive Offload (GRO) table.
+///
+/// Manages the coalescing of TCP packets belonging to the same flow into larger segments.
+/// This reduces the number of packets that need to be processed by the application,
+/// improving throughput and reducing CPU usage.
+///
+/// # How TCP GRO Works
+///
+/// 1. Packets are received from the TUN device
+/// 2. The GRO table identifies packets belonging to the same TCP flow
+/// 3. Consecutive packets in the same flow are coalesced into a single large segment
+/// 4. The coalesced segment is passed to the application
+///
+/// # Usage
+///
+/// The GRO table is typically used in conjunction with [`handle_gro`]:
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::GROTable;
+///
+/// let mut gro_table = GROTable::default();
+///
+/// // Process received packets
+/// // handle_gro(..., &mut gro_table, ...)?;
+/// # }
+/// ```
+///
+/// # Performance Considerations
+///
+/// - Maintains a compact open-addressed table of active flows
+/// - Preallocates buffers for [`IDEAL_BATCH_SIZE`] flows
+/// - Memory pooling reduces allocations
+/// - State is maintained across multiple recv_multiple calls
+pub struct TcpGROTable {
+    items_by_flow: GroFlowTable<TcpFlowKey, TcpGROItem>,
+}
+
+impl Default for TcpGROTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TcpGROTable {
+    fn new() -> Self {
+        Self {
+            items_by_flow: GroFlowTable::new(),
+        }
+    }
+}
+
+impl TcpFlowKey {
+    fn new(pkt: &[u8], src_addr_offset: usize, dst_addr_offset: usize, tcph_offset: usize) -> Self {
+        let mut key = TcpFlowKey {
+            src_addr: [0; 16],
+            dst_addr: [0; 16],
+            src_port: 0,
+            dst_port: 0,
+            rx_ack: 0,
+            is_v6: false,
+        };
+
+        let addr_size = dst_addr_offset - src_addr_offset;
+        key.src_addr[..addr_size].copy_from_slice(&pkt[src_addr_offset..dst_addr_offset]);
+        key.dst_addr[..addr_size]
+            .copy_from_slice(&pkt[dst_addr_offset..dst_addr_offset + addr_size]);
+        key.src_port = read_be_u16(&pkt[tcph_offset..]);
+        key.dst_port = read_be_u16(&pkt[tcph_offset + 2..]);
+        key.rx_ack = read_be_u32(&pkt[tcph_offset + 8..]);
+        key.is_v6 = addr_size == 16;
+        key
+    }
+}
+
+impl TcpGROTable {
+    /// lookupOrInsert looks up a flow for the provided packet and metadata,
+    /// returning the packets found for the flow, or inserting a new one if none
+    /// is found.
+    fn lookup_or_insert(
+        &mut self,
+        pkt: &[u8],
+        src_addr_offset: usize,
+        dst_addr_offset: usize,
+        tcph_offset: usize,
+        tcph_len: usize,
+        bufs_index: usize,
+    ) -> Option<&mut Vec<TcpGROItem>> {
+        let key = TcpFlowKey::new(pkt, src_addr_offset, dst_addr_offset, tcph_offset);
+        self.items_by_flow
+            .lookup_or_insert_with(key, || TcpGROItem {
+                key,
+                bufs_index: bufs_index.try_into().expect("bufs_index exceeds u16::MAX"),
+                num_merged: 0,
+                gso_size: pkt[tcph_offset + tcph_len..]
+                    .len()
+                    .try_into()
+                    .expect("gso_size exceeds u16::MAX"),
+                iph_len: tcph_offset.try_into().expect("iph_len exceeds u8::MAX"),
+                tcph_len: tcph_len.try_into().expect("tcph_len exceeds u8::MAX"),
+                sent_seq: read_be_u32(&pkt[tcph_offset + 4..tcph_offset + 8]),
+                psh_set: pkt[tcph_offset + TCP_FLAGS_OFFSET] & TCP_FLAG_PSH != 0,
+            })
+    }
+    /// insert an item in the table for the provided packet and packet metadata.
+    fn insert(
+        &mut self,
+        pkt: &[u8],
+        src_addr_offset: usize,
+        dst_addr_offset: usize,
+        tcph_offset: usize,
+        tcph_len: usize,
+        bufs_index: usize,
+    ) {
+        let key = TcpFlowKey::new(pkt, src_addr_offset, dst_addr_offset, tcph_offset);
+        let item = TcpGROItem {
+            key,
+            bufs_index: bufs_index.try_into().expect("bufs_index exceeds u16::MAX"),
+            num_merged: 0,
+            gso_size: pkt[tcph_offset + tcph_len..]
+                .len()
+                .try_into()
+                .expect("gso_size exceeds u16::MAX"),
+            iph_len: tcph_offset.try_into().expect("iph_len exceeds u8::MAX"),
+            tcph_len: tcph_len.try_into().expect("tcph_len exceeds u8::MAX"),
+            sent_seq: read_be_u32(&pkt[tcph_offset + 4..tcph_offset + 8]),
+            psh_set: pkt[tcph_offset + TCP_FLAGS_OFFSET] & TCP_FLAG_PSH != 0,
+        };
+
+        self.items_by_flow.insert(key, item);
+    }
+}
+// func (t *tcpGROTable) updateAt(item tcpGROItem, i int) {
+// 	items, _ := t.itemsByFlow[item.key]
+// 	items[i] = item
+// }
+//
+// func (t *tcpGROTable) deleteAt(key tcpFlowKey, i int) {
+// 	items, _ := t.itemsByFlow[key]
+// 	items = append(items[:i], items[i+1:]...)
+// 	t.itemsByFlow[key] = items
+// }
+
+/// tcpGROItem represents bookkeeping data for a TCP packet during the lifetime
+/// of a GRO evaluation across a vector of packets.
+#[derive(Debug, Clone, Copy)]
+pub struct TcpGROItem {
+    key: TcpFlowKey,
+    sent_seq: u32,   // the sequence number
+    bufs_index: u16, // the index into the original bufs slice
+    num_merged: u16, // the number of packets merged into this item
+    gso_size: u16,   // payload size
+    iph_len: u8,     // ip header len
+    tcph_len: u8,    // tcp header len
+    psh_set: bool,   // psh flag is set
+}
+
+// func (t *tcpGROTable) newItems() []tcpGROItem {
+// 	var items []tcpGROItem
+// 	items, t.itemsPool = t.itemsPool[len(t.itemsPool)-1], t.itemsPool[:len(t.itemsPool)-1]
+// 	return items
+// }
+impl TcpGROTable {
+    fn reset(&mut self) {
+        self.items_by_flow.reset();
+    }
+}
+
+/// udpFlowKey represents the key for a UDP flow.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct UdpFlowKey {
+    src_addr: [u8; 16], // srcAddr
+    dst_addr: [u8; 16], // dstAddr
+    src_port: u16,      // srcPort
+    dst_port: u16,      // dstPort
+    is_v6: bool,        // isV6
+}
+
+///  udpGROTable holds flow and coalescing information for the purposes of UDP GRO.
+pub struct UdpGROTable {
+    items_by_flow: GroFlowTable<UdpFlowKey, UdpGROItem>,
+}
+
+impl Default for UdpGROTable {
+    fn default() -> Self {
+        UdpGROTable::new()
+    }
+}
+
+impl UdpGROTable {
+    pub fn new() -> Self {
+        Self {
+            items_by_flow: GroFlowTable::new(),
+        }
+    }
+}
+
+impl UdpFlowKey {
+    pub fn new(
+        pkt: &[u8],
+        src_addr_offset: usize,
+        dst_addr_offset: usize,
+        udph_offset: usize,
+    ) -> UdpFlowKey {
+        let mut key = UdpFlowKey {
+            src_addr: [0; 16],
+            dst_addr: [0; 16],
+            src_port: 0,
+            dst_port: 0,
+            is_v6: false,
+        };
+        let addr_size = dst_addr_offset - src_addr_offset;
+        key.src_addr[..addr_size].copy_from_slice(&pkt[src_addr_offset..dst_addr_offset]);
+        key.dst_addr[..addr_size]
+            .copy_from_slice(&pkt[dst_addr_offset..dst_addr_offset + addr_size]);
+        key.src_port = read_be_u16(&pkt[udph_offset..]);
+        key.dst_port = read_be_u16(&pkt[udph_offset + 2..]);
+        key.is_v6 = addr_size == 16;
+        key
+    }
+}
+
+impl UdpGROTable {
+    /// Looks up a flow for the provided packet and metadata.
+    /// Returns a reference to the packets found for the flow and a boolean indicating if the flow already existed.
+    /// If the flow is not found, inserts a new flow and returns `None` for the items.
+    fn lookup_or_insert(
+        &mut self,
+        pkt: &[u8],
+        src_addr_offset: usize,
+        dst_addr_offset: usize,
+        udph_offset: usize,
+        bufs_index: usize,
+    ) -> Option<&mut Vec<UdpGROItem>> {
+        let key = UdpFlowKey::new(pkt, src_addr_offset, dst_addr_offset, udph_offset);
+        self.items_by_flow
+            .lookup_or_insert_with(key, || UdpGROItem {
+                key,
+                bufs_index: bufs_index.try_into().expect("bufs_index exceeds u16::MAX"),
+                num_merged: 0,
+                gso_size: (pkt.len() - (udph_offset + UDP_H_LEN))
+                    .try_into()
+                    .expect("gso_size exceeds u16::MAX"),
+                iph_len: udph_offset.try_into().expect("iph_len exceeds u8::MAX"),
+                c_sum_known_invalid: false,
+            })
+    }
+    /// Inserts an item in the table for the provided packet and its metadata.
+    fn insert(
+        &mut self,
+        pkt: &[u8],
+        src_addr_offset: usize,
+        dst_addr_offset: usize,
+        udph_offset: usize,
+        bufs_index: usize,
+        c_sum_known_invalid: bool,
+    ) {
+        let key = UdpFlowKey::new(pkt, src_addr_offset, dst_addr_offset, udph_offset);
+        let item = UdpGROItem {
+            key,
+            bufs_index: bufs_index.try_into().expect("bufs_index exceeds u16::MAX"),
+            num_merged: 0,
+            gso_size: (pkt.len() - (udph_offset + UDP_H_LEN))
+                .try_into()
+                .expect("gso_size exceeds u16::MAX"),
+            iph_len: udph_offset.try_into().expect("iph_len exceeds u8::MAX"),
+            c_sum_known_invalid,
+        };
+        self.items_by_flow.insert(key, item);
+    }
+}
+// func (u *udpGROTable) updateAt(item udpGROItem, i int) {
+// 	items, _ := u.itemsByFlow[item.key]
+// 	items[i] = item
+// }
+
+/// udpGROItem represents bookkeeping data for a UDP packet during the lifetime
+/// of a GRO evaluation across a vector of packets.
+#[derive(Debug, Clone, Copy)]
+pub struct UdpGROItem {
+    key: UdpFlowKey,           // udpFlowKey
+    bufs_index: u16,           // the index into the original bufs slice
+    num_merged: u16,           // the number of packets merged into this item
+    gso_size: u16,             // payload size
+    iph_len: u8,               // ip header len
+    c_sum_known_invalid: bool, // UDP header checksum validity; a false value DOES NOT imply valid, just unknown.
+}
+// func (u *udpGROTable) newItems() []udpGROItem {
+// 	var items []udpGROItem
+// 	items, u.itemsPool = u.itemsPool[len(u.itemsPool)-1], u.itemsPool[:len(u.itemsPool)-1]
+// 	return items
+// }
+
+impl UdpGROTable {
+    fn reset(&mut self) {
+        self.items_by_flow.reset();
+    }
+}
+
+/// canCoalesce represents the outcome of checking if two TCP packets are
+/// candidates for coalescing.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum CanCoalesce {
+    Prepend,
+    Unavailable,
+    Append,
+}
+
+/// ipHeadersCanCoalesce returns true if the IP headers found in pktA and pktB
+/// meet all requirements to be merged as part of a GRO operation, otherwise it
+/// returns false.
+fn ip_headers_can_coalesce(pkt_a: &[u8], pkt_b: &[u8]) -> bool {
+    if pkt_a.len() < 9 || pkt_b.len() < 9 {
+        return false;
+    }
+
+    if pkt_a[0] >> 4 == 6 {
+        if pkt_a[0] != pkt_b[0] || pkt_a[1] >> 4 != pkt_b[1] >> 4 {
+            // cannot coalesce with unequal Traffic class values
+            return false;
+        }
+        if pkt_a[7] != pkt_b[7] {
+            // cannot coalesce with unequal Hop limit values
+            return false;
+        }
+    } else {
+        if pkt_a[1] != pkt_b[1] {
+            // cannot coalesce with unequal ToS values
+            return false;
+        }
+        if pkt_a[6] >> 5 != pkt_b[6] >> 5 {
+            // cannot coalesce with unequal DF or reserved bits. MF is checked
+            // further up the stack.
+            return false;
+        }
+        if pkt_a[8] != pkt_b[8] {
+            // cannot coalesce with unequal TTL values
+            return false;
+        }
+    }
+
+    true
+}
+
+/// udpPacketsCanCoalesce evaluates if pkt can be coalesced with the packet
+/// described by item. iphLen and gsoSize describe pkt. bufs is the vector of
+/// packets involved in the current GRO evaluation. bufsOffset is the offset at
+/// which packet data begins within bufs.
+fn udp_packets_can_coalesce<B: ExpandBuffer>(
+    pkt: &[u8],
+    iph_len: u8,
+    gso_size: u16,
+    item: &UdpGROItem,
+    bufs: &[B],
+    bufs_offset: usize,
+) -> CanCoalesce {
+    let pkt_target = &bufs[item.bufs_index as usize].as_ref()[bufs_offset..];
+    if !ip_headers_can_coalesce(pkt, pkt_target) {
+        return CanCoalesce::Unavailable;
+    }
+    if (pkt_target[(iph_len as usize + UDP_H_LEN)..].len()) % (item.gso_size as usize) != 0 {
+        // A smaller than gsoSize packet has been appended previously.
+        // Nothing can come after a smaller packet on the end.
+        return CanCoalesce::Unavailable;
+    }
+    if gso_size > item.gso_size {
+        // We cannot have a larger packet following a smaller one.
+        return CanCoalesce::Unavailable;
+    }
+    CanCoalesce::Append
+}
+
+/// tcpPacketsCanCoalesce evaluates if pkt can be coalesced with the packet
+/// described by item. This function makes considerations that match the kernel's
+/// GRO self tests, which can be found in tools/testing/selftests/net/gro.c.
+#[allow(clippy::too_many_arguments)]
+fn tcp_packets_can_coalesce<B: ExpandBuffer>(
+    pkt: &[u8],
+    iph_len: u8,
+    tcph_len: u8,
+    seq: u32,
+    psh_set: bool,
+    gso_size: u16,
+    item: &TcpGROItem,
+    bufs: &[B],
+    bufs_offset: usize,
+) -> CanCoalesce {
+    let pkt_target = &bufs[item.bufs_index as usize].as_ref()[bufs_offset..];
+
+    if tcph_len != item.tcph_len {
+        // cannot coalesce with unequal tcp options len
+        return CanCoalesce::Unavailable;
+    }
+
+    if tcph_len > 20
+        && pkt[iph_len as usize + 20..iph_len as usize + tcph_len as usize]
+            != pkt_target[item.iph_len as usize + 20..item.iph_len as usize + tcph_len as usize]
+    {
+        // cannot coalesce with unequal tcp options
+        return CanCoalesce::Unavailable;
+    }
+
+    if !ip_headers_can_coalesce(pkt, pkt_target) {
+        return CanCoalesce::Unavailable;
+    }
+
+    // seq adjacency
+    let mut lhs_len = item.gso_size as usize;
+    lhs_len += (item.num_merged as usize) * (item.gso_size as usize);
+
+    if seq == item.sent_seq.wrapping_add(lhs_len as u32) {
+        // pkt aligns following item from a seq num perspective
+        if item.psh_set {
+            // We cannot append to a segment that has the PSH flag set, PSH
+            // can only be set on the final segment in a reassembled group.
+            return CanCoalesce::Unavailable;
+        }
+
+        if pkt_target[iph_len as usize + tcph_len as usize..].len() % item.gso_size as usize != 0 {
+            // A smaller than gsoSize packet has been appended previously.
+            // Nothing can come after a smaller packet on the end.
+            return CanCoalesce::Unavailable;
+        }
+
+        if gso_size > item.gso_size {
+            // We cannot have a larger packet following a smaller one.
+            return CanCoalesce::Unavailable;
+        }
+
+        return CanCoalesce::Append;
+    } else if seq.wrapping_add(gso_size as u32) == item.sent_seq {
+        // pkt aligns in front of item from a seq num perspective
+        if psh_set {
+            // We cannot prepend with a segment that has the PSH flag set, PSH
+            // can only be set on the final segment in a reassembled group.
+            return CanCoalesce::Unavailable;
+        }
+
+        if gso_size < item.gso_size {
+            // We cannot have a larger packet following a smaller one.
+            return CanCoalesce::Unavailable;
+        }
+
+        if gso_size > item.gso_size && item.num_merged > 0 {
+            // There's at least one previous merge, and we're larger than all
+            // previous. This would put multiple smaller packets on the end.
+            return CanCoalesce::Unavailable;
+        }
+
+        return CanCoalesce::Prepend;
+    }
+
+    CanCoalesce::Unavailable
+}
+
+fn checksum_valid(pkt: &[u8], iph_len: u8, proto: u8, is_v6: bool) -> bool {
+    let (src_addr_at, addr_size) = if is_v6 {
+        (IPV6_SRC_ADDR_OFFSET, 16)
+    } else {
+        (IPV4_SRC_ADDR_OFFSET, 4)
+    };
+    let iph_len = usize::from(iph_len);
+    let Some(addresses_end) = src_addr_at.checked_add(addr_size * 2) else {
+        return false;
+    };
+    if iph_len > pkt.len() || addresses_end > pkt.len() {
+        return false;
+    }
+
+    let Ok(pkt_len) = u16::try_from(pkt.len()) else {
+        return false;
+    };
+    let Ok(iph_len_u16) = u16::try_from(iph_len) else {
+        return false;
+    };
+    let Some(len_for_pseudo) = pkt_len.checked_sub(iph_len_u16) else {
+        return false;
+    };
+
+    let c_sum = pseudo_header_checksum_no_fold(
+        proto,
+        &pkt[src_addr_at..src_addr_at + addr_size],
+        &pkt[src_addr_at + addr_size..addresses_end],
+        len_for_pseudo,
+    );
+
+    (!checksum(&pkt[iph_len..], c_sum)) == 0
+}
+
+/// coalesceResult represents the result of attempting to coalesce two TCP
+/// packets.
+enum CoalesceResult {
+    InsufficientCap,
+    PSHEnding,
+    ItemInvalidCSum,
+    PktInvalidCSum,
+    Success,
+}
+
+/// coalesceUDPPackets attempts to coalesce pkt with the packet described by
+/// item, and returns the outcome.
+fn coalesce_udp_packets<B: ExpandBuffer>(
+    pkt: &[u8],
+    item: &mut UdpGROItem,
+    bufs: &mut [B],
+    bufs_offset: usize,
+    is_v6: bool,
+) -> CoalesceResult {
+    let buf = bufs[item.bufs_index as usize].as_ref();
+    // let pkt_head = &buf[bufs_offset..]; // the packet that will end up at the front
+    let headers_len = item.iph_len as usize + UDP_H_LEN;
+    let coalesced_len = buf[bufs_offset..].len() + pkt.len() - headers_len;
+    if bufs[item.bufs_index as usize].buf_capacity() < bufs_offset * 2 + coalesced_len {
+        // We don't want to allocate a new underlying array if capacity is
+        // too small.
+        return CoalesceResult::InsufficientCap;
+    }
+
+    if item.num_merged == 0
+        && (item.c_sum_known_invalid
+            || !checksum_valid(&buf[bufs_offset..], item.iph_len, IPPROTO_UDP as _, is_v6))
+    {
+        return CoalesceResult::ItemInvalidCSum;
+    }
+
+    if !checksum_valid(pkt, item.iph_len, IPPROTO_UDP as _, is_v6) {
+        return CoalesceResult::PktInvalidCSum;
+    }
+    bufs[item.bufs_index as usize].buf_extend_from_slice(&pkt[headers_len..]);
+    item.num_merged += 1;
+    CoalesceResult::Success
+}
+
+/// coalesceTCPPackets attempts to coalesce pkt with the packet described by
+/// item, and returns the outcome. This function may swap bufs elements in the
+/// event of a prepend as item's bufs index is already being tracked for writing
+/// to a Device.
+#[allow(clippy::too_many_arguments)]
+fn coalesce_tcp_packets<B: ExpandBuffer>(
+    mode: CanCoalesce,
+    pkt: &[u8],
+    pkt_bufs_index: usize,
+    gso_size: u16,
+    seq: u32,
+    psh_set: bool,
+    item: &mut TcpGROItem,
+    bufs: &mut [B],
+    bufs_offset: usize,
+    is_v6: bool,
+) -> CoalesceResult {
+    let headers_len = (item.iph_len + item.tcph_len) as usize;
+    let coalesced_len =
+        bufs[item.bufs_index as usize].as_ref()[bufs_offset..].len() + pkt.len() - headers_len;
+    // Copy data
+    if mode == CanCoalesce::Prepend {
+        if bufs[pkt_bufs_index].buf_capacity() < 2 * bufs_offset + coalesced_len {
+            // We don't want to allocate a new underlying array if capacity is
+            // too small.
+            return CoalesceResult::InsufficientCap;
+        }
+        if psh_set {
+            return CoalesceResult::PSHEnding;
+        }
+        if item.num_merged == 0
+            && !checksum_valid(
+                &bufs[item.bufs_index as usize].as_ref()[bufs_offset..],
+                item.iph_len,
+                IPPROTO_TCP as _,
+                is_v6,
+            )
+        {
+            return CoalesceResult::ItemInvalidCSum;
+        }
+        if !checksum_valid(pkt, item.iph_len, IPPROTO_TCP as _, is_v6) {
+            return CoalesceResult::PktInvalidCSum;
+        }
+        item.sent_seq = seq;
+        let extend_by = coalesced_len - pkt.len();
+        let len = bufs[pkt_bufs_index].as_ref().len();
+        bufs[pkt_bufs_index].buf_resize(len + extend_by, 0);
+        let src = bufs[item.bufs_index as usize].as_ref()
+            [bufs_offset + headers_len..bufs_offset + headers_len + extend_by]
+            .to_vec();
+        bufs[pkt_bufs_index].as_mut()[bufs_offset + pkt.len()..bufs_offset + pkt.len() + extend_by]
+            .copy_from_slice(&src);
+        // Flip the slice headers in bufs as part of prepend. The index of item
+        // is already being tracked for writing.
+        bufs.swap(item.bufs_index as usize, pkt_bufs_index);
+    } else {
+        // pkt_head = &bufs[item.bufs_index as usize][bufs_offset..];
+        if bufs[item.bufs_index as usize].buf_capacity() < 2 * bufs_offset + coalesced_len {
+            // We don't want to allocate a new underlying array if capacity is
+            // too small.
+            return CoalesceResult::InsufficientCap;
+        }
+        if item.num_merged == 0
+            && !checksum_valid(
+                &bufs[item.bufs_index as usize].as_ref()[bufs_offset..],
+                item.iph_len,
+                IPPROTO_TCP as _,
+                is_v6,
+            )
+        {
+            return CoalesceResult::ItemInvalidCSum;
+        }
+        if !checksum_valid(pkt, item.iph_len, IPPROTO_TCP as _, is_v6) {
+            return CoalesceResult::PktInvalidCSum;
+        }
+        if psh_set {
+            // We are appending a segment with PSH set.
+            item.psh_set = psh_set;
+            bufs[item.bufs_index as usize].as_mut()
+                [bufs_offset + item.iph_len as usize + TCP_FLAGS_OFFSET] |= TCP_FLAG_PSH;
+        }
+        // https://github.com/WireGuard/wireguard-go/blob/12269c2761734b15625017d8565745096325392f/tun/offload_linux.go#L495
+        // extendBy := len(pkt) - int(headersLen)
+        // 		bufs[item.bufsIndex] = append(bufs[item.bufsIndex], make([]byte, extendBy)...)
+        // 		copy(bufs[item.bufsIndex][bufsOffset+len(pktHead):], pkt[headersLen:])
+        bufs[item.bufs_index as usize].buf_extend_from_slice(&pkt[headers_len..]);
+    }
+
+    if gso_size > item.gso_size {
+        item.gso_size = gso_size;
+    }
+
+    item.num_merged += 1;
+    CoalesceResult::Success
+}
+
+const IPV4_FLAG_MORE_FRAGMENTS: u8 = 0x20;
+
+const IPV4_SRC_ADDR_OFFSET: usize = 12;
+const IPV6_SRC_ADDR_OFFSET: usize = 8;
+// maxUint16         = 1<<16 - 1
+
+#[derive(PartialEq, Eq)]
+enum GroResult {
+    Noop,
+    TableInsert,
+    Coalesced,
+}
+
+/// tcpGRO evaluates the TCP packet at pktI in bufs for coalescing with
+/// existing packets tracked in table. It returns a groResultNoop when no
+/// action was taken, groResultTableInsert when the evaluated packet was
+/// inserted into table, and groResultCoalesced when the evaluated packet was
+/// coalesced with another packet in table.
+fn tcp_gro<B: ExpandBuffer>(
+    bufs: &mut [B],
+    offset: usize,
+    pkt_i: usize,
+    table: &mut TcpGROTable,
+    is_v6: bool,
+) -> GroResult {
+    let pkt_storage = bufs[pkt_i].as_ref()[offset..].to_vec();
+    let pkt = pkt_storage.as_slice();
+    if pkt.len() > u16::MAX as usize {
+        // A valid IPv4 or IPv6 packet will never exceed this.
+        return GroResult::Noop;
+    }
+
+    let mut iph_len = ((pkt[0] & 0x0F) * 4) as usize;
+    if is_v6 {
+        iph_len = 40;
+        let ipv6_h_payload_len = u16::from_be_bytes([pkt[4], pkt[5]]) as usize;
+        if ipv6_h_payload_len != pkt.len() - iph_len {
+            return GroResult::Noop;
+        }
+    } else {
+        let total_len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
+        if total_len != pkt.len() {
+            return GroResult::Noop;
+        }
+    }
+
+    if pkt.len() < iph_len {
+        return GroResult::Noop;
+    }
+
+    if pkt.len() < iph_len + TCP_FLAGS_OFFSET + 1 {
+        return GroResult::Noop;
+    }
+
+    let tcph_len = ((pkt[iph_len + 12] >> 4) * 4) as usize;
+    if !(20..=60).contains(&tcph_len) {
+        return GroResult::Noop;
+    }
+
+    if pkt.len() < iph_len + tcph_len {
+        return GroResult::Noop;
+    }
+
+    if !is_v6 && (pkt[6] & IPV4_FLAG_MORE_FRAGMENTS != 0 || pkt[6] << 3 != 0 || pkt[7] != 0) {
+        // no GRO support for fragmented segments for now
+        return GroResult::Noop;
+    }
+
+    let tcp_flags = pkt[iph_len + TCP_FLAGS_OFFSET];
+    let mut psh_set = false;
+
+    // not a candidate if any non-ACK flags (except PSH+ACK) are set
+    if tcp_flags != TCP_FLAG_ACK {
+        if pkt[iph_len + TCP_FLAGS_OFFSET] != TCP_FLAG_ACK | TCP_FLAG_PSH {
+            return GroResult::Noop;
+        }
+        psh_set = true;
+    }
+
+    let gso_size = (pkt.len() - tcph_len - iph_len) as u16;
+    // not a candidate if payload len is 0
+    if gso_size < 1 {
+        return GroResult::Noop;
+    }
+
+    let seq = u32::from_be_bytes([
+        pkt[iph_len + 4],
+        pkt[iph_len + 5],
+        pkt[iph_len + 6],
+        pkt[iph_len + 7],
+    ]);
+
+    let mut src_addr_offset = IPV4_SRC_ADDR_OFFSET;
+    let mut addr_len = 4;
+    if is_v6 {
+        src_addr_offset = IPV6_SRC_ADDR_OFFSET;
+        addr_len = 16;
+    }
+
+    let items = if let Some(items) = table.lookup_or_insert(
+        pkt,
+        src_addr_offset,
+        src_addr_offset + addr_len,
+        iph_len,
+        tcph_len,
+        pkt_i,
+    ) {
+        items
+    } else {
+        return GroResult::TableInsert;
+    };
+
+    for i in (0..items.len()).rev() {
+        // In the best case of packets arriving in order iterating in reverse is
+        // more efficient if there are multiple items for a given flow. This
+        // also enables a natural table.delete_at() in the
+        // coalesce_item_invalid_csum case without the need for index tracking.
+        // This algorithm makes a best effort to coalesce in the event of
+        // unordered packets, where pkt may land anywhere in items from a
+        // sequence number perspective, however once an item is inserted into
+        // the table it is never compared across other items later.
+        let item = &mut items[i];
+        let can = tcp_packets_can_coalesce(
+            pkt,
+            iph_len as u8,
+            tcph_len as u8,
+            seq,
+            psh_set,
+            gso_size,
+            item,
+            bufs,
+            offset,
+        );
+
+        match can {
+            CanCoalesce::Unavailable => {}
+            _ => {
+                let result = coalesce_tcp_packets(
+                    can, pkt, pkt_i, gso_size, seq, psh_set, item, bufs, offset, is_v6,
+                );
+
+                match result {
+                    CoalesceResult::Success => {
+                        // table.update_at(item, i);
+                        return GroResult::Coalesced;
+                    }
+                    CoalesceResult::ItemInvalidCSum => {
+                        // delete the item with an invalid csum
+                        // The deleted item will not be re-visited in apply_tcp_coalesce_accounting,
+                        // so we must zero the virtioNetHdr.
+                        bufs[item.bufs_index as usize].as_mut()
+                            [offset - VIRTIO_NET_HDR_LEN..offset]
+                            .fill(0);
+                        items.remove(i);
+                    }
+                    CoalesceResult::PktInvalidCSum => {
+                        // no point in inserting an item that we can't coalesce
+                        return GroResult::Noop;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // failed to coalesce with any other packets; store the item in the flow
+    table.insert(
+        pkt,
+        src_addr_offset,
+        src_addr_offset + addr_len,
+        iph_len,
+        tcph_len,
+        pkt_i,
+    );
+    GroResult::TableInsert
+}
+
+/// Update packet headers after TCP packet coalescing.
+///
+/// After [`handle_gro`] coalesces multiple TCP packets into larger segments,
+/// this function updates the packet headers to reflect the coalesced state.
+/// It writes virtio headers with GSO information and updates IP/TCP headers.
+///
+/// # Arguments
+///
+/// * `bufs` - Mutable slice of packet buffers that were processed by GRO
+/// * `offset` - Offset where packet data begins (typically [`VIRTIO_NET_HDR_LEN`])
+/// * `table` - The TCP GRO table containing coalescing metadata
+///
+/// # What It Does
+///
+/// For each coalesced packet:
+/// 1. Creates a virtio header with GSO type set to TCP (v4 or v6)
+/// 2. Sets the segment size (`gso_size`) for future segmentation
+/// 3. Calculates and stores the pseudo-header checksum for TCP
+/// 4. Updates IP total length field
+/// 5. Recalculates IPv4 header checksum if needed
+///
+/// The resulting packets can be efficiently segmented by the kernel when transmitted.
+///
+/// # Usage
+///
+/// This function is typically called automatically by [`handle_gro`] after packet
+/// coalescing is complete. You usually don't need to call it directly.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Buffer sizes are incorrect
+/// - Header encoding fails
+/// - Packet structure is invalid
+///
+/// # See Also
+///
+/// - [`handle_gro`] - Main GRO processing function that calls this
+/// - [`TcpGROTable`] - Maintains TCP flow state for coalescing
+pub fn apply_tcp_coalesce_accounting<B: ExpandBuffer>(
+    bufs: &mut [B],
+    offset: usize,
+    table: &TcpGROTable,
+) -> io::Result<()> {
+    for items in table.items_by_flow.values() {
+        for item in items {
+            if item.num_merged > 0 {
+                let mut hdr = VirtioNetHdr {
+                    flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+                    hdr_len: (item.iph_len + item.tcph_len) as u16,
+                    gso_size: item.gso_size,
+                    csum_start: item.iph_len as u16,
+                    csum_offset: 16,
+                    gso_type: 0, // Will be set later
+                };
+                let buf = bufs[item.bufs_index as usize].as_mut();
+                let pkt = &mut buf[offset..];
+                let pkt_len = pkt.len();
+
+                // Calculate the pseudo header checksum and place it at the TCP
+                // checksum offset. Downstream checksum offloading will combine
+                // this with computation of the tcp header and payload checksum.
+                let addr_len = if item.key.is_v6 { 16 } else { 4 };
+                let src_addr_at = if item.key.is_v6 {
+                    IPV6_SRC_ADDR_OFFSET
+                } else {
+                    IPV4_SRC_ADDR_OFFSET
+                };
+
+                let mut src_addr = [0u8; 16];
+                let mut dst_addr = [0u8; 16];
+                src_addr[..addr_len].copy_from_slice(&pkt[src_addr_at..src_addr_at + addr_len]);
+                dst_addr[..addr_len]
+                    .copy_from_slice(&pkt[src_addr_at + addr_len..src_addr_at + addr_len * 2]);
+                // Recalculate the total len (IPv4) or payload len (IPv6).
+                // Recalculate the (IPv4) header checksum.
+                if item.key.is_v6 {
+                    hdr.gso_type = VIRTIO_NET_HDR_GSO_TCPV6;
+                    write_be_u16(&mut pkt[4..6], pkt_len as u16 - item.iph_len as u16);
+                } else {
+                    hdr.gso_type = VIRTIO_NET_HDR_GSO_TCPV4;
+                    pkt[10] = 0;
+                    pkt[11] = 0;
+                    write_be_u16(&mut pkt[2..4], pkt_len as u16);
+                    let iph_csum = !checksum(&pkt[..item.iph_len as usize], 0);
+                    write_be_u16(&mut pkt[10..12], iph_csum);
+                }
+
+                hdr.encode(&mut buf[offset - VIRTIO_NET_HDR_LEN..])?;
+
+                let pkt = &mut buf[offset..];
+
+                let psum = pseudo_header_checksum_no_fold(
+                    IPPROTO_TCP as _,
+                    &src_addr[..addr_len],
+                    &dst_addr[..addr_len],
+                    pkt_len as u16 - item.iph_len as u16,
+                );
+                let tcp_csum = checksum(&[], psum);
+                write_be_u16(
+                    &mut pkt[(hdr.csum_start + hdr.csum_offset) as usize..],
+                    tcp_csum,
+                );
+            } else {
+                let hdr = VirtioNetHdr::default();
+                hdr.encode(
+                    &mut bufs[item.bufs_index as usize].as_mut()[offset - VIRTIO_NET_HDR_LEN..],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// applyUDPCoalesceAccounting updates bufs to account for coalescing based on the
+// metadata found in table.
+pub fn apply_udp_coalesce_accounting<B: ExpandBuffer>(
+    bufs: &mut [B],
+    offset: usize,
+    table: &UdpGROTable,
+) -> io::Result<()> {
+    for items in table.items_by_flow.values() {
+        for item in items {
+            if item.num_merged > 0 {
+                let hdr = VirtioNetHdr {
+                    flags: VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
+                    hdr_len: item.iph_len as u16 + UDP_H_LEN as u16,
+                    gso_size: item.gso_size,
+                    csum_start: item.iph_len as u16,
+                    csum_offset: 6,
+                    gso_type: VIRTIO_NET_HDR_GSO_UDP_L4,
+                };
+
+                let buf = bufs[item.bufs_index as usize].as_mut();
+                let pkt = &mut buf[offset..];
+                let pkt_len = pkt.len();
+
+                // Calculate the pseudo header checksum and place it at the UDP
+                // checksum offset. Downstream checksum offloading will combine
+                // this with computation of the udp header and payload checksum.
+                let (addr_len, src_addr_at) = if item.key.is_v6 {
+                    (16, IPV6_SRC_ADDR_OFFSET)
+                } else {
+                    (4, IPV4_SRC_ADDR_OFFSET)
+                };
+
+                let mut src_addr = [0u8; 16];
+                let mut dst_addr = [0u8; 16];
+                src_addr[..addr_len].copy_from_slice(&pkt[src_addr_at..src_addr_at + addr_len]);
+                dst_addr[..addr_len]
+                    .copy_from_slice(&pkt[src_addr_at + addr_len..src_addr_at + addr_len * 2]);
+
+                // Recalculate the total len (IPv4) or payload len (IPv6).
+                // Recalculate the (IPv4) header checksum.
+                if item.key.is_v6 {
+                    write_be_u16(&mut pkt[4..6], pkt_len as u16 - item.iph_len as u16);
+                    // set new IPv6 header payload len
+                } else {
+                    pkt[10] = 0;
+                    pkt[11] = 0;
+                    write_be_u16(&mut pkt[2..4], pkt_len as u16); // set new total length
+                    let iph_csum = !checksum(&pkt[..item.iph_len as usize], 0);
+                    write_be_u16(&mut pkt[10..12], iph_csum); // set IPv4 header checksum field
+                }
+
+                hdr.encode(&mut buf[offset - VIRTIO_NET_HDR_LEN..])?;
+                let pkt = &mut buf[offset..];
+                // Recalculate the UDP len field value
+                write_be_u16(
+                    &mut pkt[(item.iph_len as usize + 4)..(item.iph_len as usize + 6)],
+                    pkt_len as u16 - item.iph_len as u16,
+                );
+
+                let psum = pseudo_header_checksum_no_fold(
+                    IPPROTO_UDP as _,
+                    &src_addr[..addr_len],
+                    &dst_addr[..addr_len],
+                    pkt_len as u16 - item.iph_len as u16,
+                );
+
+                let udp_csum = checksum(&[], psum);
+                write_be_u16(
+                    &mut pkt[(hdr.csum_start + hdr.csum_offset) as usize..],
+                    udp_csum,
+                );
+            } else {
+                let hdr = VirtioNetHdr::default();
+                hdr.encode(
+                    &mut bufs[item.bufs_index as usize].as_mut()[offset - VIRTIO_NET_HDR_LEN..],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(PartialEq, Eq)]
+pub enum GroCandidateType {
+    NotGRO,
+    Tcp4GRO,
+    Tcp6GRO,
+    Udp4GRO,
+    Udp6GRO,
+}
+
+pub fn packet_is_gro_candidate(b: &[u8], can_udp_gro: bool) -> GroCandidateType {
+    if b.len() < 28 {
+        return GroCandidateType::NotGRO;
+    }
+    if b[0] >> 4 == 4 {
+        if b[0] & 0x0F != 5 {
+            // IPv4 packets w/IP options do not coalesce
+            return GroCandidateType::NotGRO;
+        }
+        match b[9] {
+            6 if b.len() >= 40 => return GroCandidateType::Tcp4GRO,
+            17 if can_udp_gro => return GroCandidateType::Udp4GRO,
+            _ => {}
+        }
+    } else if b[0] >> 4 == 6 {
+        match b[6] {
+            6 if b.len() >= 60 => return GroCandidateType::Tcp6GRO,
+            17 if b.len() >= 48 && can_udp_gro => return GroCandidateType::Udp6GRO,
+            _ => {}
+        }
+    }
+    GroCandidateType::NotGRO
+}
+
+const UDP_H_LEN: usize = 8;
+
+/// udpGRO evaluates the UDP packet at pktI in bufs for coalescing with
+/// existing packets tracked in table. It returns a groResultNoop when no
+/// action was taken, groResultTableInsert when the evaluated packet was
+/// inserted into table, and groResultCoalesced when the evaluated packet was
+/// coalesced with another packet in table.
+fn udp_gro<B: ExpandBuffer>(
+    bufs: &mut [B],
+    offset: usize,
+    pkt_i: usize,
+    table: &mut UdpGROTable,
+    is_v6: bool,
+) -> GroResult {
+    let pkt_storage = bufs[pkt_i].as_ref()[offset..].to_vec();
+    let pkt = pkt_storage.as_slice();
+    if pkt.len() > u16::MAX as usize {
+        // A valid IPv4 or IPv6 packet will never exceed this.
+        return GroResult::Noop;
+    }
+
+    let mut iph_len = ((pkt[0] & 0x0F) * 4) as usize;
+    if is_v6 {
+        iph_len = 40;
+        let ipv6_payload_len = u16::from_be_bytes([pkt[4], pkt[5]]) as usize;
+        if ipv6_payload_len != pkt.len() - iph_len {
+            return GroResult::Noop;
+        }
+    } else {
+        let total_len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
+        if total_len != pkt.len() {
+            return GroResult::Noop;
+        }
+    }
+
+    if pkt.len() < iph_len || pkt.len() < iph_len + UDP_H_LEN {
+        return GroResult::Noop;
+    }
+
+    if !is_v6 && (pkt[6] & IPV4_FLAG_MORE_FRAGMENTS != 0 || pkt[6] << 3 != 0 || pkt[7] != 0) {
+        // No GRO support for fragmented segments for now.
+        return GroResult::Noop;
+    }
+
+    let gso_size = (pkt.len() - UDP_H_LEN - iph_len) as u16;
+    if gso_size < 1 {
+        return GroResult::Noop;
+    }
+
+    let (src_addr_offset, addr_len) = if is_v6 {
+        (IPV6_SRC_ADDR_OFFSET, 16)
+    } else {
+        (IPV4_SRC_ADDR_OFFSET, 4)
+    };
+
+    let items = table.lookup_or_insert(
+        pkt,
+        src_addr_offset,
+        src_addr_offset + addr_len,
+        iph_len,
+        pkt_i,
+    );
+
+    let items = if let Some(items) = items {
+        items
+    } else {
+        return GroResult::TableInsert;
+    };
+
+    // Only check the last item to prevent reordering packets for a flow.
+    let items_len = items.len();
+    let item = &mut items[items_len - 1];
+    let can = udp_packets_can_coalesce(pkt, iph_len as u8, gso_size, item, bufs, offset);
+    let mut pkt_csum_known_invalid = false;
+
+    if can == CanCoalesce::Append {
+        match coalesce_udp_packets(pkt, item, bufs, offset, is_v6) {
+            CoalesceResult::Success => {
+                // 前面是引用，这里不需要再更新
+                // table.update_at(*item, items_len - 1);
+                return GroResult::Coalesced;
+            }
+            CoalesceResult::ItemInvalidCSum => {
+                // If the existing item has an invalid checksum, take no action.
+                // A new item will be stored, and the existing item won't be revisited.
+            }
+            CoalesceResult::PktInvalidCSum => {
+                // Insert a new item but mark it with invalid checksum to avoid repeat checks.
+                pkt_csum_known_invalid = true;
+            }
+            _ => {}
+        }
+    }
+    let pkt = &bufs[pkt_i].as_ref()[offset..];
+    // Failed to coalesce; store the packet in the flow.
+    table.insert(
+        pkt,
+        src_addr_offset,
+        src_addr_offset + addr_len,
+        iph_len,
+        pkt_i,
+        pkt_csum_known_invalid,
+    );
+    GroResult::TableInsert
+}
+
+/// handleGRO evaluates bufs for GRO, and writes the indices of the resulting
+/// Process received packets and apply Generic Receive Offload (GRO) coalescing.
+///
+/// This function examines a batch of received packets and coalesces packets belonging
+/// to the same TCP or UDP flow into larger segments, reducing per-packet overhead.
+///
+/// # Arguments
+///
+/// * `bufs` - Mutable slice of packet buffers. Each buffer should contain a full packet
+///   starting at `offset` (with space before offset for the virtio header).
+/// * `offset` - Offset where packet data begins (typically [`VIRTIO_NET_HDR_LEN`]).
+///   The virtio header will be written before this offset.
+/// * `tcp_table` - TCP GRO table for tracking TCP flows.
+/// * `udp_table` - UDP GRO table for tracking UDP flows.
+/// * `can_udp_gro` - Whether UDP GRO is supported (kernel feature).
+/// * `to_write` - Output vector that will be filled with indices of packets to write.
+///   Initially should be empty.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success, or an error if packet processing fails.
+///
+/// # Behavior
+///
+/// 1. Examines each packet to determine if it's a GRO candidate (TCP or UDP)
+/// 2. Attempts to coalesce the packet with previous packets in the same flow
+/// 3. Writes indices of final packets (coalesced or standalone) to `to_write`
+/// 4. Updates packet headers with appropriate virtio headers
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::{handle_gro, GROTable, VIRTIO_NET_HDR_LEN};
+///
+/// let mut gro_table = GROTable::default();
+/// let mut bufs = vec![vec![0u8; 1500]; 128];
+/// let mut to_write: Vec<usize> = Vec::new();
+///
+/// // After receiving packets into bufs with recv_multiple:
+/// // handle_gro(
+/// //     &mut bufs,
+/// //     VIRTIO_NET_HDR_LEN,
+/// //     &mut gro_table.tcp_table,
+/// //     &mut gro_table.udp_table,
+/// //     true,  // UDP GRO supported
+/// //     &mut to_write
+/// // )?;
+///
+/// // to_write now contains indices of packets to process
+/// // for idx in &to_write {
+/// //     let packet = &bufs[*idx];
+/// //     // process packet...
+/// // }
+/// # }
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Performance
+///
+/// - Coalescing reduces the number of packets passed to the application
+/// - Typical coalescing ratios: 5-20 packets into 1 for bulk TCP transfers
+/// - Most effective for sequential TCP traffic with large receive windows
+///
+/// # See Also
+///
+/// - [`GROTable`] for managing GRO state
+/// - [`apply_tcp_coalesce_accounting`] for updating TCP headers after coalescing
+pub fn handle_gro<B: ExpandBuffer>(
+    bufs: &mut [B],
+    offset: usize,
+    tcp_table: &mut TcpGROTable,
+    udp_table: &mut UdpGROTable,
+    can_udp_gro: bool,
+    to_write: &mut Vec<usize>,
+) -> io::Result<()> {
+    if bufs.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many packet buffers",
+        ));
+    }
+    let bufs_len = bufs.len();
+    for i in 0..bufs_len {
+        if offset < VIRTIO_NET_HDR_LEN || offset >= bufs[i].as_ref().len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid offset",
+            ));
+        }
+
+        let result = match packet_is_gro_candidate(&bufs[i].as_ref()[offset..], can_udp_gro) {
+            GroCandidateType::Tcp4GRO => tcp_gro(bufs, offset, i, tcp_table, false),
+            GroCandidateType::Tcp6GRO => tcp_gro(bufs, offset, i, tcp_table, true),
+            GroCandidateType::Udp4GRO => udp_gro(bufs, offset, i, udp_table, false),
+            GroCandidateType::Udp6GRO => udp_gro(bufs, offset, i, udp_table, true),
+            GroCandidateType::NotGRO => GroResult::Noop,
+        };
+
+        match result {
+            GroResult::Noop => {
+                let hdr = VirtioNetHdr::default();
+                hdr.encode(&mut bufs[i].as_mut()[offset - VIRTIO_NET_HDR_LEN..offset])?;
+                // Fallthrough intended
+                to_write.push(i);
+            }
+            GroResult::TableInsert => {
+                to_write.push(i);
+            }
+            _ => {}
+        }
+    }
+
+    let err_tcp = apply_tcp_coalesce_accounting(bufs, offset, tcp_table);
+    let err_udp = apply_udp_coalesce_accounting(bufs, offset, udp_table);
+    err_tcp?;
+    err_udp?;
+    Ok(())
+}
+
+/// Split a GSO (Generic Segmentation Offload) packet into multiple smaller packets.
+///
+/// When sending data with offload enabled, the application can provide large packets
+/// that will be automatically segmented. This function performs the opposite operation:
+/// splitting a large GSO packet into MTU-sized segments for transmission.
+///
+/// # Arguments
+///
+/// * `input` - The input buffer containing the large GSO packet (with virtio header).
+/// * `hdr` - The virtio network header describing the GSO packet.
+/// * `out_bufs` - Output buffers where segmented packets will be written.
+/// * `sizes` - Output array where the size of each segmented packet will be written.
+/// * `out_offset` - Offset in output buffers where packet data should start.
+/// * `is_v6` - Whether this is an IPv6 packet (affects header offsets).
+///
+/// # Returns
+///
+/// Returns the number of output buffers populated (number of segments created),
+/// or an error if segmentation fails.
+///
+/// # How GSO Splitting Works
+///
+/// For a large TCP packet with GSO enabled:
+/// 1. The packet headers are parsed (IP + TCP)
+/// 2. The payload is split into segments of size `hdr.gso_size`
+/// 3. New packets are created with copied headers and updated fields:
+///    - IP length field
+///    - IP checksum (for IPv4)
+///    - TCP sequence number (incremented for each segment)
+///    - TCP checksum
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::{gso_split, VirtioNetHdr, VIRTIO_NET_HDR_LEN};
+///
+/// let mut large_packet = vec![0u8; 65536];
+/// let hdr = VirtioNetHdr::default();
+/// let mut out_bufs = vec![vec![0u8; 1500]; 128];
+/// let mut sizes = vec![0; 128];
+///
+/// // Split the GSO packet
+/// // let num_segments = gso_split(
+/// //     &mut large_packet,
+/// //     hdr,
+/// //     &mut out_bufs,
+/// //     &mut sizes,
+/// //     VIRTIO_NET_HDR_LEN,
+/// //     false  // IPv4
+/// // )?;
+///
+/// // Now out_bufs[0..num_segments] contain the segmented packets
+/// # }
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Supported Protocols
+///
+/// - TCP over IPv4 (GSO type: [`VIRTIO_NET_HDR_GSO_TCPV4`])
+/// - TCP over IPv6 (GSO type: [`VIRTIO_NET_HDR_GSO_TCPV6`])
+/// - UDP (GSO type: [`VIRTIO_NET_HDR_GSO_UDP_L4`])
+///
+/// # Performance
+///
+/// GSO allows sending fewer, larger packets to the kernel, which then performs
+/// efficient segmentation. This reduces:
+/// - Number of system calls
+/// - Per-packet processing overhead in the application
+/// - Context switches
+///
+/// Typical performance improvement: 2-5x for bulk transfers.
+/// Validate the GSO base type and TCP ECN modifier against the IP version.
+pub(super) fn gso_transport_protocol(gso_type: u8, is_v6: bool) -> io::Result<i32> {
+    let has_ecn = gso_type & VIRTIO_NET_HDR_GSO_ECN != 0;
+    let base_type = gso_type & !VIRTIO_NET_HDR_GSO_ECN;
+    match base_type {
+        VIRTIO_NET_HDR_GSO_TCPV4 if !is_v6 => Ok(IPPROTO_TCP),
+        VIRTIO_NET_HDR_GSO_TCPV6 if is_v6 => Ok(IPPROTO_TCP),
+        VIRTIO_NET_HDR_GSO_UDP_L4 if !has_ecn => Ok(IPPROTO_UDP),
+        VIRTIO_NET_HDR_GSO_TCPV4 | VIRTIO_NET_HDR_GSO_TCPV6 => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "virtio GSO type does not match IP version",
+        )),
+        VIRTIO_NET_HDR_GSO_UDP_L4 => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "VIRTIO_NET_HDR_GSO_ECN is only valid for TCP GSO",
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported virtio GSO type: {gso_type}"),
+        )),
+    }
+}
+
+#[inline]
+fn checked_segment_lengths(
+    hdr_len: usize,
+    csum_start: usize,
+    segment_data_len: usize,
+    is_v6: bool,
+) -> io::Result<(usize, u16, u16)> {
+    let transport_header_len = hdr_len.checked_sub(csum_start).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid transport header length",
+        )
+    })?;
+    let checksum_len = transport_header_len
+        .checked_add(segment_data_len)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "segment transport length overflow",
+            )
+        })?;
+    let checksum_len = u16::try_from(checksum_len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "segment transport length exceeds u16",
+        )
+    })?;
+    let total_len = hdr_len.checked_add(segment_data_len).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "segment total length overflow")
+    })?;
+    let ip_len = if is_v6 {
+        total_len.checked_sub(40).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv6 packet is shorter than the fixed header",
+            )
+        })?
+    } else {
+        total_len
+    };
+    let ip_len = u16::try_from(ip_len).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "segment IP length exceeds u16")
+    })?;
+
+    Ok((total_len, checksum_len, ip_len))
+}
+
+/// Internal capacity hint for the framed reader; the public error text is unchanged.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(all(
+        feature = "async_framed",
+        any(feature = "async_io", feature = "async_tokio")
+    )),
+    allow(dead_code)
+)]
+pub(crate) struct GsoOutputCapacity {
+    pub(crate) segments: usize,
+    pub(crate) segment_len: usize,
+}
+
+impl std::fmt::Display for GsoOutputCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("too many GSO segments")
+    }
+}
+
+impl std::error::Error for GsoOutputCapacity {}
+
+pub fn gso_split<B: AsRef<[u8]> + AsMut<[u8]>>(
+    input: &mut [u8],
+    hdr: VirtioNetHdr,
+    out_bufs: &mut [B],
+    sizes: &mut [usize],
+    out_offset: usize,
+    is_v6: bool,
+) -> io::Result<usize> {
+    if sizes.len() < out_bufs.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sizes must be at least as long as out_bufs",
+        ));
+    }
+    if out_bufs.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many packet buffers",
+        ));
+    }
+    if hdr.gso_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "virtioNetHdr.gsoSize must be non-zero",
+        ));
+    }
+    let protocol = gso_transport_protocol(hdr.gso_type, is_v6)?;
+    let expected_csum_offset = if protocol == IPPROTO_TCP { 16 } else { 6 };
+
+    if hdr.csum_offset != expected_csum_offset {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "checksum offset does not match transport protocol",
+        ));
+    }
+    if hdr.hdr_len < hdr.csum_start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "virtioNetHdr.hdrLen is smaller than csumStart",
+        ));
+    }
+    let min_iph_len = if is_v6 { 40 } else { 20 };
+    if (hdr.csum_start as usize) < min_iph_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "virtioNetHdr.csumStart is smaller than the IP header",
+        ));
+    }
+    if input.len() < hdr.hdr_len as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input shorter than virtioNetHdr.hdrLen",
+        ));
+    }
+    let hdr_len = usize::from(hdr.hdr_len);
+    let csum_start = usize::from(hdr.csum_start);
+    let iph_len = csum_start;
+    let (src_addr_offset, addr_len) = if is_v6 {
+        if input.len() < 40 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv6 packet is too short",
+            ));
+        }
+        (IPV6_SRC_ADDR_OFFSET, 16)
+    } else {
+        if input.len() < 20 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv4 packet is too short",
+            ));
+        }
+        (IPV4_SRC_ADDR_OFFSET, 4)
+    };
+
+    let transport_csum_at = csum_start
+        .checked_add(usize::from(hdr.csum_offset))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "checksum offset overflow"))?;
+    let transport_csum_end = transport_csum_at
+        .checked_add(2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "checksum field overflow"))?;
+    if transport_csum_end > hdr_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "checksum field exceeds transport header",
+        ));
+    }
+
+    let first_tcp_seq_num = if protocol == IPPROTO_TCP {
+        if (hdr.hdr_len as usize) < hdr.csum_start as usize + 20
+            || hdr.csum_start as usize + TCP_FLAGS_OFFSET + 1 > input.len()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP header is too short",
+            ));
+        }
+        read_be_u32(&input[hdr.csum_start as usize + 4..])
+    } else {
+        if (hdr.hdr_len as usize) < hdr.csum_start as usize + UDP_H_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP header is too short",
+            ));
+        }
+        0
+    };
+
+    if src_addr_offset + 2 * addr_len > input.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "packet addresses exceed input length",
+        ));
+    }
+    let src_addr_bytes = &input[src_addr_offset..src_addr_offset + addr_len];
+    let dst_addr_bytes = &input[src_addr_offset + addr_len..src_addr_offset + 2 * addr_len];
+
+    let payload_len = input.len() - hdr_len;
+    let gso_size = usize::from(hdr.gso_size);
+    let segment_count = if payload_len == 0 {
+        0
+    } else {
+        (payload_len - 1) / gso_size + 1
+    };
+    let max_segment_data_len = payload_len.min(gso_size);
+    let (max_total_len, _, _) =
+        checked_segment_lengths(hdr_len, csum_start, max_segment_data_len, is_v6)?;
+    if segment_count > out_bufs.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            GsoOutputCapacity {
+                segments: segment_count,
+                segment_len: max_total_len,
+            },
+        ));
+    }
+
+    for out_buf in &out_bufs[..segment_count] {
+        let out_len = out_buf.as_ref().len();
+        if out_offset > out_len || out_len - out_offset < max_total_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "output buffer too small",
+            ));
+        }
+    }
+
+    let mut next_segment_data_at = hdr_len;
+    let mut i = 0;
+
+    while next_segment_data_at < input.len() {
+        let candidate_segment_end = next_segment_data_at
+            .checked_add(gso_size)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "segment end overflow"))?;
+        let (next_segment_end, segment_data_len) = if candidate_segment_end > input.len() {
+            (input.len(), input.len() - next_segment_data_at)
+        } else {
+            (candidate_segment_end, gso_size)
+        };
+        let (total_len, len_for_pseudo, ip_len_field) =
+            checked_segment_lengths(hdr_len, csum_start, segment_data_len, is_v6)?;
+        let transport_csum_no_fold = pseudo_header_checksum_no_fold(
+            protocol as u8,
+            src_addr_bytes,
+            dst_addr_bytes,
+            len_for_pseudo,
+        );
+
+        sizes[i] = total_len;
+        let out = &mut out_bufs[i].as_mut()[out_offset..];
+
+        out[..iph_len].copy_from_slice(&input[..iph_len]);
+
+        if !is_v6 {
+            // For IPv4 we are responsible for incrementing the ID field,
+            // updating the total len field, and recalculating the header
+            // checksum.
+            out[10] = 0;
+            out[11] = 0; // clear IPv4 header checksum
+            if i > 0 {
+                let id = read_be_u16(&out[4..]).wrapping_add(i as u16);
+                write_be_u16(&mut out[4..6], id);
+            }
+            write_be_u16(&mut out[2..4], ip_len_field);
+            let ipv4_csum = !checksum(&out[..iph_len], 0);
+            write_be_u16(&mut out[10..12], ipv4_csum);
+        } else {
+            // For IPv6 we are responsible for updating the payload length field.
+            // IPv6 extensions are not checksumed, but included in the payload length.
+            write_be_u16(&mut out[4..6], ip_len_field);
+        }
+
+        out[csum_start..hdr_len].copy_from_slice(&input[csum_start..hdr_len]);
+        out[transport_csum_at..transport_csum_end].fill(0);
+
+        if protocol == IPPROTO_TCP {
+            let tcp_seq = first_tcp_seq_num.wrapping_add(hdr.gso_size as u32 * i as u32);
+            write_be_u32(
+                &mut out[(hdr.csum_start + 4) as usize..(hdr.csum_start + 8) as usize],
+                tcp_seq,
+            );
+            let tcp_flags = &mut out[hdr.csum_start as usize + TCP_FLAGS_OFFSET];
+            if i > 0 {
+                // Linux legacy TCP ECN GSO keeps CWR only on the first segment.
+                *tcp_flags &= !TCP_FLAG_CWR;
+            }
+            if next_segment_end != input.len() {
+                // FIN and PSH belong only to the final segment.
+                *tcp_flags &= !(TCP_FLAG_FIN | TCP_FLAG_PSH);
+            }
+        } else {
+            let udp_len = len_for_pseudo;
+            write_be_u16(
+                &mut out[(hdr.csum_start + 4) as usize..(hdr.csum_start + 6) as usize],
+                udp_len,
+            );
+        }
+
+        out[hdr.hdr_len as usize..total_len]
+            .as_mut()
+            .copy_from_slice(&input[next_segment_data_at..next_segment_end]);
+
+        let transport_csum = !checksum(
+            &out[hdr.csum_start as usize..total_len],
+            transport_csum_no_fold,
+        );
+
+        let transport_csum = if protocol == IPPROTO_UDP && transport_csum == 0 {
+            u16::MAX
+        } else {
+            transport_csum
+        };
+        write_be_u16(
+            &mut out[transport_csum_at..transport_csum_end],
+            transport_csum,
+        );
+
+        next_segment_data_at = next_segment_end;
+        i += 1;
+    }
+
+    Ok(i)
+}
+
+/// Calculate checksum for packets without GSO.
+///
+/// This function computes and writes the transport layer (TCP/UDP) checksum for
+/// packets that don't use Generic Segmentation Offload.
+///
+/// # Arguments
+///
+/// * `in_buf` - The packet buffer (mutable)
+/// * `csum_start` - Offset where checksum calculation should begin
+/// * `csum_offset` - Offset within the checksummed area where the checksum should be written
+///
+/// # Behavior
+///
+/// 1. Reads the initial checksum value (typically the pseudo-header checksum)
+/// 2. Clears the checksum field
+/// 3. Calculates the checksum over the transport header and data
+/// 4. Writes the final checksum back to the buffer
+///
+/// This is used when [`VIRTIO_NET_HDR_F_NEEDS_CSUM`] flag is set but [`VIRTIO_NET_HDR_GSO_NONE`]
+/// is the GSO type.
+pub fn gso_none_checksum(in_buf: &mut [u8], csum_start: u16, csum_offset: u16) {
+    let csum_at = (csum_start + csum_offset) as usize;
+    // The initial value at the checksum offset should be summed with the
+    // checksum we compute. This is typically the pseudo-header checksum.
+    let initial = read_be_u16(&in_buf[csum_at..]);
+    in_buf[csum_at] = 0;
+    in_buf[csum_at + 1] = 0;
+    let computed_checksum = checksum(&in_buf[csum_start as usize..], initial as u64);
+    write_be_u16(&mut in_buf[csum_at..], !computed_checksum);
+}
+
+/// Generic Receive Offload (GRO) table for managing packet coalescing.
+///
+/// This structure maintains the state needed to coalesce multiple received packets
+/// into larger segments, reducing per-packet processing overhead. It combines both
+/// TCP and UDP GRO capabilities.
+///
+/// # Purpose
+///
+/// When receiving many small packets of the same flow, GRO can combine them into
+/// fewer, larger packets. This provides significant performance benefits:
+///
+/// - Reduces the number of packets passed to the application
+/// - Fewer context switches and system calls
+/// - Better cache utilization
+/// - Lower CPU usage per gigabit of traffic
+///
+/// # Usage
+///
+/// Create a `GROTable` and reuse it across multiple `recv_multiple` calls:
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use tun_rs::{DeviceBuilder, GROTable, IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
+///
+/// let dev = DeviceBuilder::new()
+///     .offload(true)
+///     .ipv4("10.0.0.1", 24, None)
+///     .build_sync()?;
+///
+/// let mut gro_table = GROTable::default();
+/// let mut original_buffer = vec![0; VIRTIO_NET_HDR_LEN + 65535];
+/// let mut bufs = vec![vec![0u8; 1500]; IDEAL_BATCH_SIZE];
+/// let mut sizes = vec![0; IDEAL_BATCH_SIZE];
+///
+/// loop {
+///     let num = dev.recv_multiple(&mut original_buffer, &mut bufs, &mut sizes, 0)?;
+///
+///     // GRO table is automatically used by recv_multiple
+///     // to coalesce packets
+///     for i in 0..num {
+///         println!("Packet: {} bytes", sizes[i]);
+///     }
+/// }
+/// # }
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Fields
+///
+/// - `tcp_gro_table`: State for TCP packet coalescing
+/// - `udp_gro_table`: State for UDP packet coalescing (if supported by kernel)
+/// - `to_write`: Internal buffer tracking which packets to emit
+///
+/// # Performance
+///
+/// The GRO table maintains internal state across calls, including:
+/// - Hash map of active flows (preallocated for [`IDEAL_BATCH_SIZE`] flows)
+/// - Memory pools to reduce allocations
+/// - Per-flow coalescing state
+///
+/// Typical coalescing ratios:
+/// - TCP bulk transfers: 5-20 packets coalesced into 1
+/// - UDP: 2-5 packets coalesced into 1
+/// - Interactive traffic: minimal coalescing (preserves latency)
+///
+/// # Thread Safety
+///
+/// `GROTable` is not thread-safe. Use one instance per thread or protect with a mutex.
+#[derive(Default)]
+pub struct GROTable {
+    pub(crate) to_write: Vec<usize>,
+    pub(crate) tcp_gro_table: TcpGROTable,
+    pub(crate) udp_gro_table: UdpGROTable,
+}
+
+impl GROTable {
+    pub fn new() -> GROTable {
+        GROTable {
+            to_write: Vec::with_capacity(IDEAL_BATCH_SIZE),
+            tcp_gro_table: TcpGROTable::new(),
+            udp_gro_table: UdpGROTable::new(),
+        }
+    }
+    pub(crate) fn reset(&mut self) {
+        self.to_write.clear();
+        self.tcp_gro_table.reset();
+        self.udp_gro_table.reset();
+    }
+
+    #[doc(hidden)]
+    pub fn apply_gro<B: ExpandBuffer>(
+        &mut self,
+        bufs: &mut [B],
+        offset: usize,
+        can_udp_gro: bool,
+    ) -> io::Result<()> {
+        self.reset();
+        handle_gro(
+            bufs,
+            offset,
+            &mut self.tcp_gro_table,
+            &mut self.udp_gro_table,
+            can_udp_gro,
+            &mut self.to_write,
+        )
+    }
+}
+
+/// A trait for buffers that can be expanded and resized for offload operations.
+///
+/// This trait extends basic buffer operations (`AsRef<[u8]>` and `AsMut<[u8]>`)
+/// with methods needed for efficient packet processing with GRO/GSO offload support.
+/// It allows buffers to grow dynamically as needed during packet coalescing and
+/// segmentation operations.
+///
+/// # Required Methods
+///
+/// - `buf_capacity()` - Returns the current capacity of the buffer
+/// - `buf_resize()` - Resizes the buffer to a new length, filling with a value
+/// - `buf_extend_from_slice()` - Extends the buffer with data from a slice
+///
+/// # Implementations
+///
+/// This trait is implemented for:
+/// - `BytesMut` - The primary buffer type for async operations
+/// - `&mut BytesMut` - Mutable reference to BytesMut
+/// - `Vec<u8>` - Standard Rust vector
+/// - `&mut Vec<u8>` - Mutable reference to Vec
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(target_os = "linux")]
+/// # {
+/// use bytes::BytesMut;
+/// use tun_rs::ExpandBuffer;
+///
+/// let mut buffer = BytesMut::with_capacity(1500);
+/// buffer.buf_resize(20, 0); // Resize to 20 bytes, filled with zeros
+/// buffer.buf_extend_from_slice(b"packet data"); // Append data
+/// assert!(buffer.buf_capacity() >= buffer.len());
+/// # }
+/// ```
+pub trait ExpandBuffer: AsRef<[u8]> + AsMut<[u8]> {
+    /// Returns the current capacity of the buffer in bytes.
+    ///
+    /// The capacity is the total amount of memory allocated, which may be
+    /// greater than the current length of the buffer.
+    fn buf_capacity(&self) -> usize;
+
+    /// Resizes the buffer to the specified length, filling new space with the given value.
+    ///
+    /// If `new_len` is greater than the current length, the buffer is extended
+    /// and new bytes are initialized to `value`. If `new_len` is less than the
+    /// current length, the buffer is truncated.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_len` - The new length of the buffer
+    /// * `value` - The byte value to fill any new space with
+    fn buf_resize(&mut self, new_len: usize, value: u8);
+
+    /// Extends the buffer by appending data from a slice.
+    ///
+    /// This method appends all bytes from `src` to the end of the buffer,
+    /// growing the buffer as necessary.
+    ///
+    /// # Arguments
+    ///
+    /// * `src` - The slice of bytes to append to the buffer
+    fn buf_extend_from_slice(&mut self, src: &[u8]);
+}
+
+impl ExpandBuffer for BytesMut {
+    fn buf_capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn buf_resize(&mut self, new_len: usize, value: u8) {
+        self.resize(new_len, value)
+    }
+
+    fn buf_extend_from_slice(&mut self, extend: &[u8]) {
+        self.extend_from_slice(extend)
+    }
+}
+
+impl ExpandBuffer for &mut BytesMut {
+    fn buf_capacity(&self) -> usize {
+        self.capacity()
+    }
+    fn buf_resize(&mut self, new_len: usize, value: u8) {
+        self.resize(new_len, value)
+    }
+
+    fn buf_extend_from_slice(&mut self, extend: &[u8]) {
+        self.extend_from_slice(extend)
+    }
+}
+impl ExpandBuffer for Vec<u8> {
+    fn buf_capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn buf_resize(&mut self, new_len: usize, value: u8) {
+        self.resize(new_len, value)
+    }
+
+    fn buf_extend_from_slice(&mut self, extend: &[u8]) {
+        self.extend_from_slice(extend)
+    }
+}
+impl ExpandBuffer for &mut Vec<u8> {
+    fn buf_capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn buf_resize(&mut self, new_len: usize, value: u8) {
+        self.resize(new_len, value)
+    }
+
+    fn buf_extend_from_slice(&mut self, extend: &[u8]) {
+        self.extend_from_slice(extend)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy, Eq, Hash, PartialEq)]
+    struct CollidingFlowKey(u16);
+
+    #[derive(Default)]
+    struct ZeroHasher;
+
+    impl std::hash::Hasher for ZeroHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _bytes: &[u8]) {}
+    }
+
+    #[test]
+    fn flow_table_resolves_collisions_grows_and_resets() {
+        let mut table = GroFlowTable::<
+            CollidingFlowKey,
+            u16,
+            std::hash::BuildHasherDefault<ZeroHasher>,
+        >::with_hasher(std::hash::BuildHasherDefault::default());
+        let count = GRO_FLOW_TABLE_SLOTS + 17;
+
+        for value in 0..count {
+            let value = u16::try_from(value).unwrap();
+            assert!(table
+                .lookup_or_insert_with(CollidingFlowKey(value), || value)
+                .is_none());
+        }
+        assert_eq!(table.values().count(), count);
+
+        for value in 0..count {
+            let value = u16::try_from(value).unwrap();
+            let items = table
+                .lookup_or_insert_with(CollidingFlowKey(value), || {
+                    panic!("existing key reinserted")
+                })
+                .unwrap();
+            assert_eq!(items, &[value]);
+        }
+
+        table.reset();
+        assert_eq!(table.values().count(), 0);
+        assert!(table
+            .lookup_or_insert_with(CollidingFlowKey(7), || 7)
+            .is_none());
+        let items = table
+            .lookup_or_insert_with(CollidingFlowKey(7), || panic!("existing key reinserted"))
+            .unwrap();
+        assert_eq!(items, &[7]);
+    }
+
+    #[test]
+    fn flow_table_grows_before_reaching_full_occupancy() {
+        type CollisionTable =
+            GroFlowTable<CollidingFlowKey, u16, std::hash::BuildHasherDefault<ZeroHasher>>;
+
+        let make_table = || CollisionTable::with_hasher(std::hash::BuildHasherDefault::default());
+
+        let mut lazy_table = make_table();
+        let initial_slots = lazy_table.slots.len();
+        let load_limit = initial_slots * 3 / 4;
+        for value in 0..load_limit {
+            let value = u16::try_from(value).unwrap();
+            assert!(lazy_table
+                .lookup_or_insert_with(CollidingFlowKey(value), || value)
+                .is_none());
+        }
+        assert_eq!(lazy_table.slots.len(), initial_slots);
+
+        let existing = lazy_table
+            .lookup_or_insert_with(CollidingFlowKey(0), || panic!("existing key reinserted"))
+            .unwrap();
+        assert_eq!(existing, &[0]);
+        assert_eq!(lazy_table.slots.len(), initial_slots);
+
+        let next = u16::try_from(load_limit).unwrap();
+        assert!(lazy_table
+            .lookup_or_insert_with(CollidingFlowKey(next), || next)
+            .is_none());
+        assert_eq!(lazy_table.slots.len(), initial_slots * 2);
+
+        let mut insert_table = make_table();
+        for value in 0..load_limit {
+            let value = u16::try_from(value).unwrap();
+            insert_table.insert(CollidingFlowKey(value), value);
+        }
+        assert_eq!(insert_table.slots.len(), initial_slots);
+
+        insert_table.insert(CollidingFlowKey(0), u16::MAX);
+        assert_eq!(insert_table.slots.len(), initial_slots);
+        assert_eq!(
+            insert_table
+                .lookup_or_insert_with(CollidingFlowKey(0), || panic!("existing key reinserted"))
+                .unwrap(),
+            &[0, u16::MAX]
+        );
+
+        insert_table.insert(CollidingFlowKey(next), next);
+        assert_eq!(insert_table.slots.len(), initial_slots * 2);
+    }
+
+    fn make_ipv4_tcp_packet(seq: u32, payload_len: usize) -> Vec<u8> {
+        const IPH_LEN: usize = 20;
+        const TCPH_LEN: usize = 20;
+
+        let total_len = IPH_LEN + TCPH_LEN + payload_len;
+        let mut pkt = vec![0u8; total_len];
+
+        pkt[0] = 0x45;
+        pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        pkt[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
+        pkt[6] = 0x40;
+        pkt[8] = 64;
+        pkt[9] = IPPROTO_TCP as u8;
+        pkt[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        pkt[16..20].copy_from_slice(&[10, 0, 0, 2]);
+
+        pkt[IPH_LEN..IPH_LEN + 2].copy_from_slice(&10000u16.to_be_bytes());
+        pkt[IPH_LEN + 2..IPH_LEN + 4].copy_from_slice(&10001u16.to_be_bytes());
+        pkt[IPH_LEN + 4..IPH_LEN + 8].copy_from_slice(&seq.to_be_bytes());
+        pkt[IPH_LEN + 8..IPH_LEN + 12].copy_from_slice(&1u32.to_be_bytes());
+        pkt[IPH_LEN + 12] = 5 << 4;
+        pkt[IPH_LEN + 13] = TCP_FLAG_ACK;
+        pkt[IPH_LEN + 14..IPH_LEN + 16].copy_from_slice(&4096u16.to_be_bytes());
+
+        for (idx, byte) in pkt[IPH_LEN + TCPH_LEN..].iter_mut().enumerate() {
+            *byte = idx as u8;
+        }
+
+        let ip_checksum = !checksum(&pkt[..IPH_LEN], 0);
+        pkt[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+        let pseudo = pseudo_header_checksum_no_fold(
+            IPPROTO_TCP as u8,
+            &pkt[12..16],
+            &pkt[16..20],
+            (TCPH_LEN + payload_len) as u16,
+        );
+        let tcp_checksum = !checksum(&pkt[IPH_LEN..], pseudo);
+        pkt[IPH_LEN + 16..IPH_LEN + 18].copy_from_slice(&tcp_checksum.to_be_bytes());
+
+        pkt
+    }
+
+    #[test]
+    fn checksum_valid_rejects_truncated_headers_without_panic() {
+        assert!(!checksum_valid(&[0; 19], 20, IPPROTO_TCP as u8, false));
+        assert!(!checksum_valid(&[0; 39], 40, IPPROTO_TCP as u8, true));
+    }
+
+    #[test]
+    fn checksum_valid_rejects_oversized_packets() {
+        let pkt = vec![0u8; usize::from(u16::MAX) + 1];
+        assert!(!checksum_valid(&pkt, 20, IPPROTO_TCP as u8, false));
+    }
+
+    #[test]
+    fn handle_gro_rejects_invalid_offset() {
+        let mut table = GROTable::new();
+        let mut bufs = vec![vec![0u8; VIRTIO_NET_HDR_LEN]];
+        let err = table
+            .apply_gro(&mut bufs, VIRTIO_NET_HDR_LEN, false)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn handle_gro_ignores_truncated_tcp_header_without_panic() {
+        let mut table = GROTable::new();
+        let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN];
+        let mut pkt = vec![0u8; 60];
+        pkt[0] = 0x4f;
+        pkt[2..4].copy_from_slice(&60u16.to_be_bytes());
+        pkt[9] = IPPROTO_TCP as u8;
+        buf.extend_from_slice(&pkt);
+        let mut bufs = vec![buf];
+
+        table
+            .apply_gro(&mut bufs, VIRTIO_NET_HDR_LEN, false)
+            .unwrap();
+    }
+
+    #[test]
+    fn gso_split_rejects_zero_gso_size() {
+        let mut input = make_ipv4_tcp_packet(1, 128);
+        let hdr = VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 0,
+            csum_start: 20,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let mut out = vec![vec![0u8; 1500]; 2];
+        let mut sizes = vec![0usize; 2];
+
+        let err = gso_split(&mut input, hdr, &mut out, &mut sizes, 0, false).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn gso_split_rejects_small_output_buffer() {
+        let mut input = make_ipv4_tcp_packet(1, 512);
+        let hdr = VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 256,
+            csum_start: 20,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let mut out = vec![vec![0u8; 64]; 4];
+        let mut sizes = vec![0usize; 4];
+
+        let err = gso_split(&mut input, hdr, &mut out, &mut sizes, 0, false).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn gso_split_ignores_unused_output_buffers() {
+        let mut input = make_ipv4_tcp_packet(1, 512);
+        let hdr = VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 256,
+            csum_start: 20,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let mut out = vec![vec![0u8; 296], vec![0u8; 296], vec![]];
+        let mut sizes = vec![0usize; 3];
+
+        let count = gso_split(&mut input, hdr, &mut out, &mut sizes, 0, false).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(&sizes[..count], &[296, 296]);
+    }
+}
+
+#[cfg(test)]
+mod gso_type_contract_tests {
+    use super::{
+        gso_transport_protocol, TCP_FLAGS_OFFSET, TCP_FLAG_ACK, TCP_FLAG_CWR, TCP_FLAG_FIN,
+        TCP_FLAG_PSH, VIRTIO_NET_HDR_GSO_ECN, VIRTIO_NET_HDR_GSO_TCPV4, VIRTIO_NET_HDR_GSO_TCPV6,
+        VIRTIO_NET_HDR_GSO_UDP_L4,
+    };
+    use libc::{IPPROTO_TCP, IPPROTO_UDP};
+    use std::io;
+
+    #[test]
+    fn accepts_matching_tcp_types_with_ecn() -> io::Result<()> {
+        assert_eq!(
+            gso_transport_protocol(VIRTIO_NET_HDR_GSO_TCPV4 | VIRTIO_NET_HDR_GSO_ECN, false)?,
+            IPPROTO_TCP
+        );
+        assert_eq!(
+            gso_transport_protocol(VIRTIO_NET_HDR_GSO_TCPV6 | VIRTIO_NET_HDR_GSO_ECN, true)?,
+            IPPROTO_TCP
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_udp_l4_without_ecn() -> io::Result<()> {
+        assert_eq!(
+            gso_transport_protocol(VIRTIO_NET_HDR_GSO_UDP_L4, false)?,
+            IPPROTO_UDP
+        );
+        assert_eq!(
+            gso_transport_protocol(VIRTIO_NET_HDR_GSO_UDP_L4, true)?,
+            IPPROTO_UDP
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gso_split_accepts_tcpv4_with_ecn_flag() -> io::Result<()> {
+        const HEADER_LEN: usize = 40;
+        let mut input = vec![0u8; HEADER_LEN + 8];
+        input[0] = 0x45; // IPv4, 20-byte header
+        let total_len = u16::try_from(input.len()).map_err(io::Error::other)?;
+        input[2..4].copy_from_slice(&total_len.to_be_bytes());
+        input[9] = libc::IPPROTO_TCP as u8;
+        input[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        input[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        input[20..22].copy_from_slice(&1234u16.to_be_bytes());
+        input[22..24].copy_from_slice(&443u16.to_be_bytes());
+        input[24..28].copy_from_slice(&1000u32.to_be_bytes());
+        input[32] = 5 << 4; // TCP data offset: 20 bytes
+        input[33] = TCP_FLAG_ACK | TCP_FLAG_CWR | TCP_FLAG_FIN | TCP_FLAG_PSH;
+
+        let hdr = super::VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4 | VIRTIO_NET_HDR_GSO_ECN,
+            hdr_len: HEADER_LEN as u16,
+            gso_size: 4,
+            csum_start: 20,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let mut out = vec![vec![0u8; HEADER_LEN + 4]; 2];
+        let mut sizes = vec![0usize; 2];
+
+        let count = super::gso_split(&mut input, hdr, &mut out, &mut sizes, 0, false)?;
+        assert_eq!(count, 2);
+        assert_eq!(&sizes[..count], &[HEADER_LEN + 4, HEADER_LEN + 4]);
+
+        let first_flags = out[0][20 + TCP_FLAGS_OFFSET];
+        let last_flags = out[1][20 + TCP_FLAGS_OFFSET];
+        assert_eq!(first_flags & TCP_FLAG_CWR, TCP_FLAG_CWR);
+        assert_eq!(first_flags & (TCP_FLAG_FIN | TCP_FLAG_PSH), 0);
+        assert_eq!(last_flags & TCP_FLAG_CWR, 0);
+        assert_eq!(
+            last_flags & (TCP_FLAG_FIN | TCP_FLAG_PSH),
+            TCP_FLAG_FIN | TCP_FLAG_PSH
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_gso_type_combinations() {
+        for (gso_type, is_v6) in [
+            (VIRTIO_NET_HDR_GSO_TCPV4, true),
+            (VIRTIO_NET_HDR_GSO_TCPV6, false),
+            (VIRTIO_NET_HDR_GSO_UDP_L4 | VIRTIO_NET_HDR_GSO_ECN, false),
+            (0xff, false),
+        ] {
+            let err = gso_transport_protocol(gso_type, is_v6)
+                .expect_err("invalid GSO type unexpectedly accepted");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn gso_split_rejects_checksum_field_outside_header_without_mutating_input() {
+        let mut input = vec![0u8; 60];
+        input[0] = 0x45;
+        input[10] = 0x12;
+        input[11] = 0x34;
+        let original = input.clone();
+        let hdr = super::VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 4,
+            csum_start: 20,
+            csum_offset: 30,
+            ..Default::default()
+        };
+        let mut out = vec![vec![0u8; 60]; 5];
+        let mut sizes = vec![0usize; 5];
+
+        let err = super::gso_split(&mut input, hdr, &mut out, &mut sizes, 0, false)
+            .expect_err("checksum field outside hdr_len unexpectedly accepted");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(input, original);
+    }
+
+    #[test]
+    fn gso_split_rejects_segment_lengths_that_do_not_fit_wire_fields() {
+        const HEADER_LEN: usize = 40;
+        let mut input = vec![0u8; HEADER_LEN + usize::from(u16::MAX)];
+        input[0] = 0x45;
+        let original = input.clone();
+        let hdr = super::VirtioNetHdr {
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: HEADER_LEN as u16,
+            gso_size: u16::MAX,
+            csum_start: 20,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let mut out = vec![vec![0u8; input.len()]];
+        let mut sizes = vec![0usize; 1];
+
+        let err = super::gso_split(&mut input, hdr, &mut out, &mut sizes, 0, false)
+            .expect_err("oversized segment unexpectedly accepted");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(input, original);
+    }
+}

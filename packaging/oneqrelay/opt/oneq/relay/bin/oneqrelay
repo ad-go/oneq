@@ -1,0 +1,4 @@
+#!/bin/sh
+# oneqrelay: federated registry and relay for the oneq mesh. The Python libraries are bundled.
+export PYTHONPATH=/opt/oneq/relay:/opt/oneq/relay/site-packages${PYTHONPATH:+:$PYTHONPATH}
+exec /usr/bin/python3 /opt/oneq/relay/oneqrelay.py "$@"

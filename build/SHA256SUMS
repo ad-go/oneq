@@ -1,0 +1,9 @@
+2fecb5dfc741fa69846e9ae7bb8cd0006775d66c3b9c5f6e6b278b4e09ebbf65 *./android/app-release.apk
+7c31ee21046600deb3b4fe3b403a343ff0d1f0dfa3de8e24b6c72be9e1799b9f *./browser/oneq-mesh-chromium-0.0.1.zip
+2bf812b7653ac66bd038f6ac9830397790508140936b2ba7279e273deaab38ae *./browser/oneq-mesh-firefox-0.0.1.zip
+e3d7f73eab692b3e04c6d7fa2b07d3411aa15cde8b528596d295427bdbaebee5 *./debian/oneq-server_0.0.1_all.deb
+c5dac3a88fa299c374d1572a2ef0b7a6f0e9cab3f09f6224cb2e057ef971ec11 *./debian/oneqnode_0.0.1_amd64.deb
+006d2ad6cd9acba2b09119225ac99f190bf050f7ff255751d037290c6be57b8f *./debian/oneqrelay_0.0.1_amd64.deb
+38aaf16e872414468fcb3eb13c5334ecac2bb19b40c30f6827f02a48d8190adc *./macos/oneq-node-macos-arm64.tar.gz
+3f7776bc4315c377a0440bc82c99f351c712935ea242d762f92a642dc1a58d70 *./macos/oneq-node-macos-x64.tar.gz
+0414bef39af2542516521cad389d6b38cbf72dc8ae31335531c51b568b08bb9e *./windows/oneq-node-windows-x64.msi

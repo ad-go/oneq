@@ -1,0 +1,14 @@
+#!/bin/sh
+# Starts the node NAME, i.e. the [NAME] section of /etc/oneq/node.conf. Used by oneqnode@NAME.service (systemd) and
+# by the supervisord program oneqnode-NAME, so both start it the same way.
+# As root (supervisord) it drops to the unprivileged oneqnode user keeping only CAP_NET_ADMIN, which is all the node
+# needs to create and configure its TAP interface; under systemd the unit already provides exactly that.
+set -e
+name=$1
+[ -n "$name" ] || { echo "usage: run NAME" >&2; exit 2; }
+if [ "$(id -u)" = 0 ]; then
+    exec /usr/bin/setpriv --reuid=oneqnode --regid=oneqnode --clear-groups --no-new-privs \
+        --inh-caps=-all,+net_admin --ambient-caps=-all,+net_admin --bounding-set=-all,+net_admin \
+        /opt/oneq/node/bin/oneqnode run --config /etc/oneq/node.conf --node "$name"
+fi
+exec /opt/oneq/node/bin/oneqnode run --config /etc/oneq/node.conf --node "$name"

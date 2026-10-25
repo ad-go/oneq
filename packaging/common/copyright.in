@@ -1,0 +1,19 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: oneq
+Upstream-Contact: oneq <k@1q.ro>
+
+Files: *
+Copyright: 2026 oneq <k@1q.ro>
+License: unspecified
+ No license has been chosen for this software yet: all rights are reserved by the
+ copyright holder. Choose and add a license before redistributing the packages.
+
+Files: opt/oneq/@SHORT@/site-packages/*
+Copyright: their respective authors
+License: various
+ Third-party Python packages bundled unmodified, installed from PyPI wheels:
+@BUNDLED@
+ The license text of each one is in its *.dist-info directory under
+ /opt/oneq/@SHORT@/site-packages. They are distributed under permissive licenses
+ (Apache-2.0, BSD, MIT or PSF-2.0); cryptography wheels additionally contain OpenSSL
+ (Apache-2.0).

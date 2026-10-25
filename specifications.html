@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tunmesh-pq/v2: specification</title>
+<style>
+:root {
+  --bg: #fbfcfb; --fg: #1d2420; --muted: #5b665f; --line: #d5ddd8; --panel: #f0f4f1;
+  --accent: #0f6b58; --warn-bg: #fff4e0; --warn-line: #e0a53a; --bad-bg: #fdeceb; --bad-line: #d65b52; --code-bg: #eef2ef;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131815; --fg: #e3e9e5; --muted: #98a59d; --line: #2c3731; --panel: #1a211d;
+    --accent: #4fc4a6; --warn-bg: #2b2414; --warn-line: #8a6a22; --bad-bg: #2d1a19; --bad-line: #8f3b35; --code-bg: #1d2520;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131815; --fg: #e3e9e5; --muted: #98a59d; --line: #2c3731; --panel: #1a211d;
+  --accent: #4fc4a6; --warn-bg: #2b2414; --warn-line: #8a6a22; --bad-bg: #2d1a19; --bad-line: #8f3b35; --code-bg: #1d2520;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+header h1 { margin: 0 0 4px; font-size: 1.9rem; }
+header p { margin: 0; color: var(--muted); }
+nav.toc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; margin: 20px 0 8px; }
+nav.toc ol { margin: 6px 0 0; padding-left: 1.4em; columns: 2 280px; column-gap: 28px; }
+nav.toc a { color: var(--accent); text-decoration: none; }
+nav.toc a:hover { text-decoration: underline; }
+h2 { margin-top: 2.6em; padding-top: .4em; border-top: 1px solid var(--line); font-size: 1.4rem; }
+h3 { margin-top: 1.8em; font-size: 1.1rem; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
+pre code { background: none; padding: 0; }
+.tw { overflow-x: auto; margin: 12px 0; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+th { background: var(--panel); }
+td.n, th.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.note, .warn, .bad { border-left: 4px solid var(--accent); background: var(--panel); padding: 10px 14px; border-radius: 6px; margin: 14px 0; }
+.warn { border-color: var(--warn-line); background: var(--warn-bg); }
+.bad { border-color: var(--bad-line); background: var(--bad-bg); }
+.tag { display: inline-block; font-size: .75rem; font-weight: 600; padding: 0 7px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); }
+.yes { color: var(--accent); font-weight: 600; }
+.no { color: var(--bad-line); font-weight: 600; }
+.part { color: var(--warn-line); font-weight: 600; }
+footer { margin-top: 3em; color: var(--muted); font-size: .85rem; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>tunmesh-pq/v2</h1>
+  <p>Specification of the wire protocol of the oneq mesh network: message format, key derivation, transcript, threat model and the limits of the guarantees.</p>
+</header>
+
+<div class="bad">
+  <strong>Status:</strong> educational project, <strong>without independent cryptographic audit and without formal proof</strong>. This document describes
+  what the code does (<code>meshproto.py</code>, <code>oneqtunel.py</code>, <code>oneqnode.py</code>, <code>client/core/src/wire.rs</code>) and the security arguments are informal.
+  Do not use the protocol to protect anything you could not afford to lose. See <a href="#neg">section 12</a> for what oneq does <em>not</em> guarantee.
+</div>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#conv">Conventions and scope</a></li>
+    <li><a href="#prim">Primitives and constants</a></li>
+    <li><a href="#id">Identity and roles</a></li>
+    <li><a href="#msg">Message format</a></li>
+    <li><a href="#kdf">Key derivation (HKDF)</a></li>
+    <li><a href="#tr">The transcript</a></li>
+    <li><a href="#hs">Handshake procedure</a></li>
+    <li><a href="#data">Data plane</a></li>
+    <li><a href="#rly">Delegated nodes (M_RLY)</a></li>
+    <li><a href="#frag">Fragmentation and PUNCH</a></li>
+    <li><a href="#tm">Threat model</a></li>
+    <li><a href="#neg">What oneq does NOT guarantee</a></li>
+    <li><a href="#ver">Verification and conformance</a></li>
+  </ol>
+</nav>
+
+<!-- ===================================================================== 1 -->
+<h2 id="conv">1. Conventions and scope</h2>
+<ul>
+  <li><code>a || b</code> is byte concatenation. All integers in headers are <strong>big-endian</strong> (<code>u32</code>, <code>u64</code>). Offsets are counted from 0.</li>
+  <li>The words <strong>MUST</strong>, <strong>MUST NOT</strong>, <strong>MAY</strong> have the meaning given in RFC 2119. What is not marked this way describes the behavior of the implementations.</li>
+  <li><code>H(x…)</code> = SHA-256 over the concatenation of the arguments. <code>KDF(salt, ikm)</code> is defined in <a href="#kdf">section 5</a>.</li>
+  <li>The roles: <strong>I</strong> = initiator (sends INIT), <strong>R</strong> = responder. <code>S_x</code> = the static public key of x (1216 B), <code>s_x</code> = the corresponding private key.</li>
+</ul>
+<h3>What the document covers</h3>
+<p>Covered: the hybrid handshake, the encrypted data plane between two members, the fragmentation messages, PUNCH and the M_RLY operations of delegated nodes. The transport (direct UDP, or datagrams carried by oneqrelay over WebSocket with the frame <code>node_id(16) || datagram</code>) is treated only as an unreliable and untrusted channel.</p>
+<p>Not covered (described only as an assumption): the oneqrelay registry API, user authentication (password, token), the federation between oneqrelay instances, TLS to the registry, STUN/NAT classification. They decide <em>who is a member</em> and <em>what public keys each one has</em>; see <a href="#tm">section 11</a>.</p>
+
+<!-- ===================================================================== 2 -->
+<h2 id="prim">2. Primitives and constants</h2>
+<div class="tw"><table>
+<tr><th>Primitive</th><th>Standard</th><th>Parameters used</th></tr>
+<tr><td>X25519</td><td>RFC 7748</td><td>public key 32 B, shared secret 32 B</td></tr>
+<tr><td>ML-KEM-768</td><td>FIPS 203</td><td>encapsulation key (<code>ek</code>) 1184 B, ciphertext (<code>ct</code>) 1088 B, shared secret 32 B, private key stored as a 64 B <em>seed</em></td></tr>
+<tr><td>ChaCha20-Poly1305</td><td>RFC 8439</td><td>key 32 B, nonce 12 B, tag 16 B</td></tr>
+<tr><td>SHA-256</td><td>FIPS 180-4</td><td>32 B</td></tr>
+<tr><td>HKDF-SHA256</td><td>RFC 5869</td><td>extract + expand in a single call, 64 B output; in K3 the IKM is empty</td></tr>
+</table></div>
+
+<h3>Protocol constants</h3>
+<div class="tw"><table>
+<tr><th>Name</th><th class="n">Value</th><th>Role</th></tr>
+<tr><td><code>LABEL</code></td><td class="n">65 B ASCII</td><td><code>tunmesh-pq/v2 hybrid X25519+ML-KEM-768 ChaCha20Poly1305 SHA256 L2</code></td></tr>
+<tr><td><code>ck0 = H(LABEL)</code></td><td class="n">32 B</td><td><code>333bf0b823ee5690bbee13997ded17476c712e8ded7930601d7a30602f854421</code> (hex)</td></tr>
+<tr><td>HKDF info</td><td class="n">13 B ASCII</td><td><code>tunsec-pq kdf</code> (does <em>not</em> contain the version; the version is in <code>LABEL</code>)</td></tr>
+<tr><td>Nonce in the handshake</td><td class="n">12 × 0x00</td><td>safe only because each handshake key (<code>k1</code>, <code>k2</code>) encrypts a single message</td></tr>
+<tr><td>INIT length</td><td class="n">2349 B</td><td></td></tr>
+<tr><td>RESP length</td><td class="n">2233 B</td><td></td></tr>
+<tr><td>DATA / RLY header</td><td class="n">13 B</td><td>type(1) || receiver_idx(4) || counter(8)</td></tr>
+<tr><td>Anti-replay window</td><td class="n">1024</td><td>packets</td></tr>
+<tr><td><code>REKEY_AFTER</code></td><td class="n">120 s</td><td>the initiator redoes the handshake after the session reaches this age</td></tr>
+<tr><td><code>REJECT_AFTER</code></td><td class="n">180 s</td><td>an older session neither sends nor accepts any more</td></tr>
+<tr><td><code>MAX_COUNTER</code></td><td class="n">2<sup>60</sup></td><td>a session whose counter has been reached no longer sends</td></tr>
+<tr><td><code>KEEPALIVE</code></td><td class="n">25 s</td><td>a DATA packet with an empty payload if nothing has been sent</td></tr>
+<tr><td><code>HS_RETRY</code></td><td class="n">2 s</td><td>retransmission of INIT while there is no session</td></tr>
+<tr><td><code>max_skew</code></td><td class="n">180 s</td><td>the maximum accepted deviation of the timestamp in INIT</td></tr>
+<tr><td>INIT budget</td><td class="n">10 + 5/s</td><td>token bucket <em>per node</em> (not per peer): one INIT costs 1 token, capacity 10, refill 5 tokens/s</td></tr>
+<tr><td>Pending INITs</td><td class="n">4 / 10 s</td><td>at most 4 initiator states per peer; they are deleted after 10 s</td></tr>
+</table></div>
+<p class="note">The timing values are those of the Python reference implementation and of <code>wire.rs</code> (<code>REKEY_AFTER</code>, <code>REJECT_AFTER</code>, <code>MAX_COUNTER</code>, the 1024 window and <code>max_skew</code> 180 s are identical in Rust). The remaining operational constants (budget, probes) may differ between implementations without changing the wire format.</p>
+
+<!-- ===================================================================== 3 -->
+<h2 id="id">3. Identity and roles</h2>
+<h3>3.1 The static key</h3>
+<p>Each node has a <strong>hybrid</strong> static pair:</p>
+<ul>
+  <li>the private key (96 B on disk, base64): <code>x25519_secret(32) || mlkem768_seed(64)</code>;</li>
+  <li>the public key <code>S</code> (1216 B): <code>x25519_public(32) || mlkem768_ek(1184)</code>. We write <code>S.x</code> (the first 32 B) and <code>S.k</code> (the remaining 1184 B).</li>
+</ul>
+<h3>3.2 node_id</h3>
+<p><code>node_id = SHA-256(S)[0:16]</code> (16 B). It is the identifier used in the registry, in the INIT header and in the relay frames.</p>
+<h3>3.3 Key ↔ id binding and the source of trust in keys</h3>
+<p>The public keys of the other members come from the <strong>oneqrelay registry</strong>. A node MUST ignore any registry entry for which <code>SHA-256(S)[0:16] ≠ node_id</code> (checked in <code>oneqnode.apply_members</code>). This prevents the registry from changing the key of an existing <code>node_id</code>, but it does <strong>not</strong> prevent it from introducing a new member (another <code>node_id</code>, another key) or from removing a member and giving its IP/MAC address to a different key. There is no key pinning outside the registry; see <a href="#neg">section 12.1</a>. The registration of a node with a oneqrelay can prove possession of the private key through a KEM challenge (<code>oneqpop.py</code>, outside the data protocol): it prevents an account holder who does not have the key from registering or overwriting the node's entry, but not a compromised registry.</p>
+<h3>3.4 The initiator / responder role</h3>
+<p>For each pair of members, the initiator is the one with the smaller <code>S</code> in lexicographic order of the 1216 B (<code>S_a &lt; S_b</code> ⇒ a is I). Exactly one end initiates. A node that receives INIT from a peer for which it is itself the initiator ignores it.</p>
+
+<!-- ===================================================================== 4 -->
+<h2 id="msg">4. Message format</h2>
+<p>The first byte of any datagram that belongs to the protocol is the type. Demultiplexing on the same UDP socket:</p>
+<div class="tw"><table>
+<tr><th class="n">First byte</th><th>Message</th><th>Note</th></tr>
+<tr><td class="n">0x00–0x03</td><td>STUN</td><td>only if bytes 4–7 are <code>0x2112A442</code> and the length is ≥ 20 (RFC 5389); outside the tunmesh protocol</td></tr>
+<tr><td class="n">0x14</td><td>PUNCH</td><td>§4.5</td></tr>
+<tr><td class="n">0x15</td><td>FRAG</td><td>§4.4; carries fragments of INIT/RESP</td></tr>
+<tr><td class="n">0x21</td><td>INIT</td><td>§4.1 (after reassembly)</td></tr>
+<tr><td class="n">0x22</td><td>RESP</td><td>§4.2 (after reassembly)</td></tr>
+<tr><td class="n">0x23</td><td>DATA</td><td>§4.3</td></tr>
+<tr><td class="n">0x24</td><td>RLY</td><td>§4.3 and <a href="#rly">section 9</a></td></tr>
+</table></div>
+<p>The types <code>0x11</code>–<code>0x13</code> (tunsec-pq/v1) are NOT valid in v2; there is no version negotiation (<a href="#neg">12.8</a>).</p>
+
+<h3 id="m-init">4.1 INIT (0x21), 2349 B</h3>
+<p>Sent as a logical message of 2349 B, fragmented into two FRAG datagrams (1193 B + 1156 B of payload, §4.4).</p>
+<div class="tw"><table>
+<tr><th class="n">Offset</th><th class="n">Length</th><th>Field</th><th>Content</th></tr>
+<tr><td class="n">0</td><td class="n">1</td><td><code>type</code></td><td><code>0x21</code></td></tr>
+<tr><td class="n">1</td><td class="n">4</td><td><code>idx_i</code></td><td>the session index chosen by I (random <code>u32</code>, ≠ 0, unique among I's sessions). R will put it as <code>receiver_idx</code> in packets to I</td></tr>
+<tr><td class="n">5</td><td class="n">16</td><td><code>node_id_i</code></td><td>the <code>node_id</code> of I, in the clear</td></tr>
+<tr><td class="n">21</td><td class="n">32</td><td><code>E_i</code></td><td>the ephemeral X25519 public key of I</td></tr>
+<tr><td class="n">53</td><td class="n">1184</td><td><code>ek_e</code></td><td>the ephemeral ML-KEM-768 encapsulation key of I</td></tr>
+<tr><td class="n">1237</td><td class="n">1088</td><td><code>ct_sr</code></td><td>ML-KEM: encapsulation to <code>S_r.k</code> (static)</td></tr>
+<tr><td class="n">2325</td><td class="n">24</td><td><code>enc1</code></td><td>ChaCha20-Poly1305(<code>k1</code>, nonce 0, <code>ts</code>, AAD = <code>h1</code>): 8 B ciphertext + 16 B tag</td></tr>
+</table></div>
+<p><code>ts</code> = <code>u64</code> BE, microseconds since the Unix epoch, according to I's clock.</p>
+
+<h3 id="m-resp">4.2 RESP (0x22), 2233 B</h3>
+<p>Fragmented into two FRAG datagrams (1193 B + 1040 B of payload).</p>
+<div class="tw"><table>
+<tr><th class="n">Offset</th><th class="n">Length</th><th>Field</th><th>Content</th></tr>
+<tr><td class="n">0</td><td class="n">1</td><td><code>type</code></td><td><code>0x22</code></td></tr>
+<tr><td class="n">1</td><td class="n">4</td><td><code>idx_r</code></td><td>the index chosen by R (≠ 0, unique at R)</td></tr>
+<tr><td class="n">5</td><td class="n">4</td><td><code>idx_i</code></td><td>the echo of <code>idx_i</code> from INIT</td></tr>
+<tr><td class="n">9</td><td class="n">32</td><td><code>E_r</code></td><td>the ephemeral X25519 public key of R</td></tr>
+<tr><td class="n">41</td><td class="n">1088</td><td><code>ct_e</code></td><td>ML-KEM: encapsulation to <code>ek_e</code> (ephemeral of I)</td></tr>
+<tr><td class="n">1129</td><td class="n">1088</td><td><code>ct_si</code></td><td>ML-KEM: encapsulation to <code>S_i.k</code> (static)</td></tr>
+<tr><td class="n">2217</td><td class="n">16</td><td><code>enc2</code></td><td>ChaCha20-Poly1305(<code>k2</code>, nonce 0, empty plaintext, AAD = <code>h3</code>): the tag only</td></tr>
+</table></div>
+
+<h3 id="m-data">4.3 DATA (0x23) and RLY (0x24)</h3>
+<div class="tw"><table>
+<tr><th class="n">Offset</th><th class="n">Length</th><th>Field</th><th>Content</th></tr>
+<tr><td class="n">0</td><td class="n">1</td><td><code>type</code></td><td><code>0x23</code> (DATA) or <code>0x24</code> (RLY)</td></tr>
+<tr><td class="n">1</td><td class="n">4</td><td><code>receiver_idx</code></td><td>the index that the <em>recipient</em> chose for this session (<code>idx_i</code> if the recipient is I, <code>idx_r</code> if it is R)</td></tr>
+<tr><td class="n">5</td><td class="n">8</td><td><code>counter</code></td><td>the packet counter, from 0, grows by 1 per packet sent (DATA and RLY share the counter)</td></tr>
+<tr><td class="n">13</td><td class="n">n + 16</td><td><code>ciphertext</code></td><td>ChaCha20-Poly1305(<code>k_send</code>, nonce, payload, AAD = the first 13 B)</td></tr>
+</table></div>
+<ul>
+  <li><strong>Nonce (12 B)</strong> = <code>00 00 00 00 || counter(8)</code>.</li>
+  <li><strong>AAD</strong> = the 13 B of the header (type, receiver_idx, counter). So the type, the recipient and the counter are authenticated, and a DATA packet cannot be replayed as RLY or vice versa.</li>
+  <li>Minimum length 29 B (keepalive: empty payload). The DATA payload is either an <strong>Ethernet frame</strong> (≥ 14 B; L3 clients wrap the IP packet in an Ethernet frame) or one of the control payloads:</li>
+</ul>
+<div class="tw"><table>
+<tr><th>Payload</th><th>Meaning</th></tr>
+<tr><td>(empty, 0 B)</td><td>keepalive / acknowledgement (I sends it immediately after RESP, so that R learns I's address)</td></tr>
+<tr><td><code>0x00</code> (1 B)</td><td>probe: the recipient answers with <code>0x01</code></td></tr>
+<tr><td><code>0x01</code> (1 B)</td><td>reply to the probe (used for recovering the direct path and for the RTT of delegated nodes)</td></tr>
+<tr><td>≥ 14 B</td><td>Ethernet frame; not to be confused with the 1 B payloads</td></tr>
+</table></div>
+
+<h3 id="m-frag">4.4 FRAG (0x15)</h3>
+<div class="tw"><table>
+<tr><th class="n">Offset</th><th class="n">Length</th><th>Field</th></tr>
+<tr><td class="n">0</td><td class="n">1</td><td><code>type</code> = <code>0x15</code></td></tr>
+<tr><td class="n">1</td><td class="n">4</td><td><code>msg_id</code>: random <code>u32</code> per logical message</td></tr>
+<tr><td class="n">5</td><td class="n">1</td><td><code>index</code> (from 0)</td></tr>
+<tr><td class="n">6</td><td class="n">1</td><td><code>total</code> (1…4)</td></tr>
+<tr><td class="n">7</td><td class="n">≤ 1193</td><td>the fragment: all exactly 1193 B, except the last</td></tr>
+</table></div>
+<p>A datagram of at most 1200 B. Reassembly details are in <a href="#frag">section 10</a>. The FRAG header is <strong>not authenticated</strong>; authentication comes from the AEAD of the reassembled message.</p>
+
+<h3 id="m-punch">4.5 PUNCH (0x14)</h3>
+<p>17 B: <code>0x14 || sender_node_id(16)</code>, <strong>unauthenticated</strong>. The effects are described in <a href="#frag">section 10</a>.</p>
+
+<!-- ===================================================================== 5 -->
+<h2 id="kdf">5. Key derivation</h2>
+<h3>5.1 The KDF function</h3>
+<pre><code>KDF(salt, ikm) = HKDF-SHA256( salt = salt,
+                              IKM  = ikm,
+                              info = "tunsec-pq kdf"  (13 ASCII bytes),
+                              L    = 64 )
+                 = T(1) || T(2)          (RFC 5869: PRK = HMAC(salt, ikm))</code></pre>
+<p>All ML-KEM and X25519 secrets are 32 B. <strong>The ML-KEM secret comes before the X25519 one in every IKM</strong> (the X25519MLKEM768 order from TLS). Below, the inputs appear exactly in concatenation order.</p>
+
+<h3>5.2 The three derivations</h3>
+<div class="tw"><table>
+<tr><th>#</th><th>Salt</th><th>IKM (in order)</th><th>Output (64 B)</th></tr>
+<tr>
+  <td><strong>K1</strong><br>(INIT)</td>
+  <td><code>ck0</code></td>
+  <td>
+    1. <code>k_sr</code> (32 B, ML-KEM)<br>
+    2. <code>dh1</code> (32 B, X25519)<br>
+    3. <code>dh2</code> (32 B, X25519)<br>
+    4. <code>h1</code> (32 B, transcript)
+  </td>
+  <td><code>ck1 = out[0:32]</code>, <code>k1 = out[32:64]</code></td>
+</tr>
+<tr>
+  <td><strong>K2</strong><br>(RESP)</td>
+  <td><code>ck1</code></td>
+  <td>
+    1. <code>k_e</code> (32 B, ML-KEM)<br>
+    2. <code>k_si</code> (32 B, ML-KEM)<br>
+    3. <code>dh_ee</code> (32 B, X25519)<br>
+    4. <code>dh_se</code> (32 B, X25519)<br>
+    5. <code>h3</code> (32 B, transcript)
+  </td>
+  <td><code>ck2 = out[0:32]</code>, <code>k2 = out[32:64]</code></td>
+</tr>
+<tr>
+  <td><strong>K3</strong><br>(transport)</td>
+  <td><code>ck2</code></td>
+  <td>(empty, 0 B)</td>
+  <td><code>k_i2r = out[0:32]</code>, <code>k_r2i = out[32:64]</code></td>
+</tr>
+</table></div>
+
+<h3>5.3 Where the secrets come from</h3>
+<div class="tw"><table>
+<tr><th>Value</th><th>Computed by I</th><th>Computed by R</th></tr>
+<tr><td><code>k_sr</code></td><td><code>(k_sr, ct_sr) = Encaps(S_r.k)</code></td><td><code>k_sr = Decaps(s_r.k, ct_sr)</code></td></tr>
+<tr><td><code>dh1</code></td><td><code>X25519(e_i, S_r.x)</code></td><td><code>X25519(s_r.x, E_i)</code></td></tr>
+<tr><td><code>dh2</code></td><td><code>X25519(s_i.x, S_r.x)</code></td><td><code>X25519(s_r.x, S_i.x)</code></td></tr>
+<tr><td><code>k_e</code></td><td><code>k_e = Decaps(dk_e, ct_e)</code> (<code>dk_e</code> = the ephemeral ML-KEM key of I)</td><td><code>(k_e, ct_e) = Encaps(ek_e)</code></td></tr>
+<tr><td><code>k_si</code></td><td><code>k_si = Decaps(s_i.k, ct_si)</code></td><td><code>(k_si, ct_si) = Encaps(S_i.k)</code></td></tr>
+<tr><td><code>dh_ee</code></td><td><code>X25519(e_i, E_r)</code></td><td><code>X25519(e_r, E_i)</code></td></tr>
+<tr><td><code>dh_se</code></td><td><code>X25519(s_i.x, E_r)</code></td><td><code>X25519(e_r, S_i.x)</code></td></tr>
+</table></div>
+<p><code>e_i, E_i</code> = the ephemeral X25519 pair of I; <code>e_r, E_r</code> = that of R; <code>(dk_e, ek_e)</code> = the ephemeral ML-KEM pair generated by I for this handshake. All ephemerals are generated fresh at every handshake (including at rekey).</p>
+
+<h3>5.4 The resulting keys</h3>
+<div class="tw"><table>
+<tr><th>Key</th><th>Used for</th><th>Notes</th></tr>
+<tr><td><code>k1</code></td><td>the AEAD in INIT (<code>enc1</code>)</td><td>single use, nonce 0</td></tr>
+<tr><td><code>k2</code></td><td>the AEAD in RESP (<code>enc2</code>)</td><td>single use, nonce 0; depends on <code>ck1</code>, hence proves that R was able to compute K1 (it has R's static keys)</td></tr>
+<tr><td><code>k_i2r</code></td><td>DATA/RLY from I to R</td><td>I: send key; R: receive key</td></tr>
+<tr><td><code>k_r2i</code></td><td>DATA/RLY from R to I</td><td>R: send key; I: receive key</td></tr>
+</table></div>
+<p>The same transport keys protect both DATA and RLY; the type in the header (in the AAD) separates them.</p>
+
+<!-- ===================================================================== 6 -->
+<h2 id="tr">6. The transcript</h2>
+<p>The transcript is a chain of hashes <code>h</code> plus a chain of keys <code>ck</code> (chaining key). <code>h</code> enters every IKM and is the AAD of every handshake AEAD, so any byte modified in the message or in the static identities changes the keys and makes the tag fail to verify.</p>
+<div class="tw"><table>
+<tr><th>Value</th><th>Definition</th></tr>
+<tr><td><code>ck0</code></td><td><code>H(LABEL)</code></td></tr>
+<tr><td><code>hdr_init</code></td><td><code>0x21 || idx_i || node_id_i</code> (21 B, exactly as it appears in INIT)</td></tr>
+<tr><td><code>h0</code></td><td><code>H(ck0 || S_i || S_r || hdr_init)</code>: both full static keys (1216 B each), <strong>in the order (initiator, responder)</strong> at both ends</td></tr>
+<tr><td><code>h1</code></td><td><code>H(h0 || E_i || ek_e || ct_sr)</code></td></tr>
+<tr><td><code>ck1, k1</code></td><td>K1 (section 5.2) with <code>h1</code> in the IKM</td></tr>
+<tr><td><code>enc1</code></td><td><code>AEAD(k1, nonce 0, ts, aad = h1)</code></td></tr>
+<tr><td><code>h2</code></td><td><code>H(h1 || enc1)</code></td></tr>
+<tr><td><code>hdr_resp</code></td><td><code>0x22 || idx_r || idx_i</code> (9 B)</td></tr>
+<tr><td><code>h3</code></td><td><code>H(h2 || hdr_resp || E_r || ct_e || ct_si)</code></td></tr>
+<tr><td><code>ck2, k2</code></td><td>K2 with <code>h3</code> in the IKM</td></tr>
+<tr><td><code>enc2</code></td><td><code>AEAD(k2, nonce 0, "", aad = h3)</code></td></tr>
+<tr><td><code>h4</code></td><td><code>H(h3 || enc2)</code>: computed by the implementations, but <strong>not used</strong> any further; the transport keys (K3) depend on <code>ck2</code>, which in turn depends on <code>h3</code></td></tr>
+</table></div>
+
+<h3>6.1 What the transcript binds</h3>
+<ul>
+  <li>the version and the suite (through <code>LABEL</code> in <code>ck0</code>);</li>
+  <li>both complete static public keys (not just <code>node_id</code>), so the session keys are bound to the pair of identities;</li>
+  <li>the INIT header (including <code>idx_i</code> and <code>node_id_i</code>) and the RESP header (<code>idx_r</code>, <code>idx_i</code>): an attacker cannot change the indexes without breaking the tags;</li>
+  <li>all ephemeral keys and all KEM ciphertexts (<code>E_i, ek_e, ct_sr, E_r, ct_e, ct_si</code>);</li>
+  <li>the timestamp (through <code>enc1</code> in <code>h2</code>).</li>
+</ul>
+<h3>6.2 What the transcript does NOT bind</h3>
+<ul>
+  <li>the network addresses (IP/port) or the path (direct / relay / delegated node) over which the messages traveled;</li>
+  <li>the FRAG headers (<code>msg_id</code>, <code>index</code>, <code>total</code>): the reassembled message is authenticated, the fragments are not;</li>
+  <li>the confirmation from I (the empty DATA packet sent after RESP) is not part of the transcript: R installs the session immediately after a valid INIT, before knowing that I received RESP;</li>
+  <li><code>h4</code> (see above).</li>
+</ul>
+
+<!-- ===================================================================== 7 -->
+<h2 id="hs">7. Handshake procedure</h2>
+<pre><code>   I (initiator)                                              R (responder)
+   ─────────────                                              ───────────────
+   generates e_i, (dk_e, ek_e)
+   (k_sr, ct_sr) = Encaps(S_r.k)
+   h0, h1; K1 → ck1, k1
+   enc1 = AEAD(k1, ts, aad=h1)
+                         ── INIT ──────────────────────────▶
+                                                              checks length/type, node_id → known peer,
+                                                              role, budget; k_sr = Decaps; K1; checks enc1
+                                                              checks ts (replay/skew)
+                                                              generates e_r; Encaps(ek_e), Encaps(S_i.k)
+                                                              h3; K2 → ck2, k2; enc2; K3 → transport keys
+                                                              INSTALLS the session
+                         ◀────────────────────────────── RESP ──
+   checks lengths, idx_i == mine
+   k_e, k_si = Decaps; K2; checks enc2
+   K3 → transport keys; INSTALLS the session
+                         ── DATA (empty payload) ─────────▶  (R learns I's address)</code></pre>
+
+<h3>7.1 The initiator</h3>
+<ol>
+  <li>Chooses <code>idx_i</code> (random, ≠ 0, unused), generates <code>e_i</code> and <code>(dk_e, ek_e)</code>.</li>
+  <li>Computes <code>(k_sr, ct_sr)</code>, <code>h0</code>, <code>h1</code>, <code>dh1</code>, <code>dh2</code>, K1; <code>enc1</code> with <code>ts</code> = the current clock in µs.</li>
+  <li>Sends INIT (fragmented) on all candidate paths (UDP to the peer's endpoints; through oneqrelay if there is no endpoint or after <code>relay_after</code> = 10 s without a session). Retries every <code>HS_RETRY</code> = 2 s while it has no session; keeps at most 4 pending states, each for 10 s.</li>
+  <li>On RESP: refuses if the length or the type is wrong or if the echoed <code>idx_i</code> does not match a pending state; then <code>k_e, k_si</code>, K2, checks <code>enc2</code>; on any AEAD error it <strong>silently drops the message</strong>. On success it computes K3, installs the session (<code>send = k_i2r</code>, <code>recv = k_r2i</code>) and immediately sends a DATA with an empty payload.</li>
+  <li>Renewal: if the current session is ≥ <code>REKEY_AFTER</code> (120 s) old, I repeats the handshake. The old session stays as the <em>previous</em> one (receive only) until it expires or is replaced.</li>
+</ol>
+<h3>7.2 The responder</h3>
+<p>The order of the checks (cheap → expensive), each failure = silent drop:</p>
+<ol>
+  <li>length exactly 2349 B and type <code>0x21</code>;</li>
+  <li><code>node_id_i</code> belongs to a known member of the registry, and the local role is R (otherwise the node may refresh the registry);</li>
+  <li>if INIT came through oneqrelay, the <code>src_id</code> of the frame equals <code>node_id_i</code>;</li>
+  <li>the token bucket (<code>init_budget</code>) has ≥ 1 token;</li>
+  <li><code>node_id_i == SHA-256(S_i)[0:16]</code> for the key in the registry;</li>
+  <li><code>k_sr = Decaps</code>, <code>dh1</code>, <code>dh2</code>, K1, verification of the <code>enc1</code> tag with AAD <code>h1</code>;</li>
+  <li><code>ts &gt; last_ts[peer]</code> (strict) and <code>|now − ts| ≤ max_skew</code> (180 s); then <code>last_ts[peer] = ts</code>. <code>last_ts</code> is <strong>in memory</strong>, lost on restart;</li>
+  <li>chooses <code>idx_r</code>, generates <code>e_r</code>, builds RESP, computes K3, installs the session (<code>send = k_r2i</code>, <code>recv = k_i2r</code>) and sends RESP on the path over which INIT came.</li>
+</ol>
+<p>A responder's session becomes <em>current</em> immediately; the previous one stays as <em>previous</em>. A DATA packet is tried on the session whose <code>local_idx</code> equals <code>receiver_idx</code>.</p>
+
+<!-- ===================================================================== 8 -->
+<h2 id="data">8. Data plane</h2>
+<h3>8.1 Sending</h3>
+<ol>
+  <li>If <code>age ≥ REJECT_AFTER</code> or <code>counter ≥ MAX_COUNTER</code> the session no longer sends.</li>
+  <li><code>hdr = type || remote_idx || counter</code>; <code>counter</code> grows by 1; <code>ct = ChaCha20-Poly1305(k_send, 0⁴ || counter, payload, aad = hdr)</code>; the datagram is <code>hdr || ct</code>.</li>
+</ol>
+<h3>8.2 Receiving</h3>
+<ol>
+  <li>Length ≥ 29 B, type <code>0x23</code> or <code>0x24</code>, <code>age &lt; REJECT_AFTER</code>.</li>
+  <li><code>receiver_idx</code> → the session (current or previous) with that <code>local_idx</code>; otherwise drop.</li>
+  <li><strong>Replay check before decryption</strong>: <code>counter</code> must be greater than the highest seen, or within the last 1024 counters and not yet seen.</li>
+  <li>Decryption with <code>k_recv</code>; on failure drop. <strong>Only after success</strong> is the counter marked as seen.</li>
+  <li>The peer's path (source address) is updated <em>after</em> authentication.</li>
+</ol>
+<h3>8.3 Frame delivery (L2)</h3>
+<p>After decryption, a payload ≥ 14 B is an Ethernet frame. The node drops it if: the length is &lt; 14 or &gt; MTU + 22; the source address has the group bit set or is its own address; the source address is the <em>registered</em> MAC of another member. Otherwise it writes the frame to the TAP interface. There is no forwarding between peers (no transit).</p>
+
+<!-- ===================================================================== 9 -->
+<h2 id="rly">9. Delegated nodes: RLY (0x24)</h2>
+<p>A member can send a datagram destined for another member through a <em>delegated node</em> (a member authorized by the administrator in the registry) with which both have a direct session. The RLY packet has the DATA format (§4.3), with type <code>0x24</code>, the same keys and the same counter as the session between the member and the delegated node. The decrypted payload is <code>op(1) || body</code>:</p>
+<div class="tw"><table>
+<tr><th class="n">op</th><th>Name</th><th>Body</th><th>Meaning</th></tr>
+<tr><td class="n">1</td><td><code>RLY_FWD</code></td><td><code>dst_id(16) || datagram</code> (datagram ≤ 1600 B)</td><td>member → delegated node: send the datagram to the member <code>dst_id</code></td></tr>
+<tr><td class="n">2</td><td><code>RLY_DLV</code></td><td><code>src_id(16) || datagram</code> (body length &gt; 17)</td><td>delegated node → member: datagram from <code>src_id</code></td></tr>
+<tr><td class="n">3</td><td><code>RLY_NACK</code></td><td><code>dst_id(16) || reason(1)</code> (17 B)</td><td>delegated node → member: delivery impossible; reason 1 = destination unreachable, 2 = rate limit</td></tr>
+</table></div>
+<p>The <em>datagram</em> is a complete packet for the other member (DATA, or a handshake fragment): it is protected by the session between the two members, so the delegated node cannot read or modify it undetected. Rules:</p>
+<ul>
+  <li>The <code>src_id</code> in <code>RLY_DLV</code> is set by the delegated node; the receiver accepts <code>RLY_DLV</code>/<code>RLY_NACK</code> only from nodes that the registry lists as delegated. A false label results in at most one packet rejected by the session between the members.</li>
+  <li>A node without delegation in the registry ignores <code>RLY_FWD</code>. The delegated node applies a total token bucket (the quota from the registry, kbit/s) and one per sender (half of it); <code>RLY_NACK</code> at most once per second and per pair.</li>
+  <li>A single hop: a datagram received through RLY is not forwarded any further by the node that delivers it.</li>
+</ul>
+
+<!-- ===================================================================== 10 -->
+<h2 id="frag">10. Fragmentation and PUNCH</h2>
+<h3>10.1 Fragmentation</h3>
+<p>Only INIT and RESP are fragmented. A message is split into chunks of 1193 B (the last may be shorter); at most 4 fragments. The receiver reassembles by the key (source, <code>msg_id</code>). A fragment is rejected if: the datagram length is &gt; 1200 or &lt; 7, the type ≠ <code>0x15</code>, <code>total</code> ∉ [1,4], <code>index ≥ total</code>, a fragment other than the last is not exactly 1193 B, <code>total</code> differs from that of the other fragments of the same message, or the fragment is a duplicate. Limits: lifetime 5 s, at most 16 messages in flight, 4 per source, 64 KiB in total. The reassembled message is then treated as INIT or RESP and authenticated by the AEAD.</p>
+<h3>10.2 PUNCH</h3>
+<p>A node without a session with a peer periodically sends <code>PUNCH</code> to the peer's endpoints: it opens the NAT mapping and tells the peer (if the peer has a session older than 3 s and is the initiator) that a new handshake may be needed. The receiver reacts at most once every 5 s per peer. Being <strong>unauthenticated</strong>, PUNCH can be forged by anyone who knows a member <code>node_id</code> (see <a href="#neg">12.3</a>).</p>
+
+<!-- ===================================================================== 11 -->
+<h2 id="tm">11. Threat model</h2>
+<h3>11.1 Protected assets</h3>
+<ul>
+  <li><strong>A1.</strong> The confidentiality and integrity of the Ethernet frames between two members.</li>
+  <li><strong>A2.</strong> The authenticity of the endpoints: a frame is attributed to the member whose static key took part in the handshake.</li>
+  <li><strong>A3.</strong> The session keys of past sessions, after a later compromise of the static keys.</li>
+</ul>
+<h3>11.2 Adversaries</h3>
+<div class="tw"><table>
+<tr><th>Code</th><th>Adversary</th><th>Assumed capabilities</th></tr>
+<tr><td>N1</td><td>Passive network</td><td>sees, copies and stores any datagram (UDP, WebSocket to oneqrelay)</td></tr>
+<tr><td>N2</td><td>Active network</td><td>N1 + modifies, deletes, duplicates, reorders, injects, forges source addresses</td></tr>
+<tr><td>Q1</td><td>"Store now, decrypt later" recorder</td><td>N1 + a cryptographically relevant quantum computer <em>after</em> the session (breaks X25519, does not break ML-KEM-768)</td></tr>
+<tr><td>Q2</td><td>Active quantum adversary at handshake time</td><td>N2 + breaks X25519 in real time</td></tr>
+<tr><td>R1</td><td>Compromised or malicious oneqrelay registry</td><td>N2 + controls the member list, the public keys, the assigned IP/MAC addresses, the published endpoints; does NOT have the nodes' private keys</td></tr>
+<tr><td>D1</td><td>Malicious delegated node (member authorized as a relay)</td><td>sees the encrypted datagrams of the members that use it; may delete, delay or duplicate them</td></tr>
+<tr><td>M1</td><td>Malicious member (valid account)</td><td>valid sessions with all members; may send any L2 frame with its own MAC address</td></tr>
+<tr><td>C1</td><td>Compromise of a node's static key</td><td>reads the private key after or before a session</td></tr>
+</table></div>
+<h3>11.3 Trust assumptions</h3>
+<ul>
+  <li>The primitives (X25519, ML-KEM-768, ChaCha20-Poly1305, SHA-256, HKDF) are secure and correctly implemented by the libraries used (the cryptographic libraries of each implementation: <code>cryptography</code>/OpenSSL in Python, the libraries in <code>client/core</code> in Rust).</li>
+  <li>The registry is trusted for <strong>membership</strong> (who is a member, what key they have), not for confidentiality. The channel to the registry is TLS 1.3 with X25519MLKEM768 key exchange and classical certificates.</li>
+  <li>The system's random number generator is good; private keys are not exported from the node.</li>
+  <li>The members' clocks are synchronized to within ±180 s.</li>
+</ul>
+<h3>11.4 Properties aimed for (informal argument, not proven)</h3>
+<div class="tw"><table>
+<tr><th>Property</th><th>Argument</th><th>Adversaries</th></tr>
+<tr><td>Data confidentiality</td><td>the transport keys depend on <code>k_e</code> (ephemeral ML-KEM) <em>and</em> on <code>dh_ee</code> (ephemeral X25519), plus the static secrets. An adversary must recover all the relevant ones</td><td class="yes">N1, N2</td></tr>
+<tr><td>Hybrid resistance</td><td>an attacker who breaks only X25519 (Q1) still does not obtain <code>k_e</code>/<code>k_si</code>/<code>k_sr</code>; one who breaks only ML-KEM still does not obtain <code>dh_ee</code>/<code>dh_se</code>. Each IKM contains both families</td><td class="yes">Q1 (confidentiality)</td></tr>
+<tr><td>Forward secrecy</td><td><code>k_e</code> and <code>dh_ee</code> come from fresh ephemeral keys; a later compromise of the static keys does not reveal them</td><td class="yes">C1 (after the session), provided the ephemerals are erased from memory (not guaranteed, see <a href="#neg">12.6</a>)</td></tr>
+<tr><td>Authentication of R to I</td><td><code>k2</code> depends on <code>ck1</code>, and that on <code>k_sr</code>, <code>dh1</code>, <code>dh2</code>: only whoever has R's static keys can compute them. <code>k_sr</code> requires ML-KEM, <code>dh1</code>/<code>dh2</code> require X25519</td><td class="yes">N2; Q2 only if it does not break ML-KEM</td></tr>
+<tr><td>Authentication of I to R</td><td>the <code>enc1</code> tag depends on <code>dh2</code> (classical, static-static). The transport keys additionally depend on <code>k_si</code> (only I can decapsulate) and on <code>dh_se</code>. <strong>R knows for sure that I is I only when it receives the first valid DATA packet</strong></td><td class="part">N2 fully; Q2 can forge <em>INIT</em> (installs a session at R that the attacker cannot use: denial of service), cannot derive transport keys</td></tr>
+<tr><td>Binding to identities and to context</td><td>the transcript includes the complete static keys, the headers, all ephemerals and the KEMs</td><td class="yes">N2</td></tr>
+<tr><td>Replay protection (DATA)</td><td>strictly increasing counter per direction, window of 1024, check before decryption, marking after; the session dies at 180 s</td><td class="yes">N2</td></tr>
+<tr><td>Replay protection (INIT)</td><td>authenticated timestamp, strictly increasing per peer and within ±180 s</td><td class="part">N2, except for the window after the responder restarts (<a href="#neg">12.4</a>)</td></tr>
+<tr><td>Type separation</td><td>the type is in the AAD; DATA and RLY cannot be confused</td><td class="yes">N2</td></tr>
+<tr><td>Resistance of confidentiality to registry compromise</td><td>the registry has no private keys; it sees only <code>node_id</code>, public keys, endpoints</td><td class="yes">R1 (confidentiality)</td></tr>
+</table></div>
+
+<!-- ===================================================================== 12 -->
+<h2 id="neg">12. What oneq does NOT guarantee</h2>
+<div class="warn">The list below is intentionally explicit. Each item is a real limit of this version, not a rhetorical assumption.</div>
+
+<h3>12.1 Member authenticity depends on the registry</h3>
+<ul>
+  <li>A compromised registry (R1) <strong>can add a member</strong> with its own key and <strong>can replace a member</strong>: it deletes a node's record and assigns its IP/MAC address to a new key. The nodes accept any consistent entry (<code>node_id = SHA-256(S)[0:16]</code>) that the registry lists. The key ↔ id binding does not defend against this: it defends only against changing the key under the same <code>node_id</code>.</li>
+  <li>There is no key pinning (TOFU), no out-of-band verification (fingerprints compared by users) and no transparency log. A MITM by the registry on a <em>new</em> or <em>replaced member</em> is not detectable by the others.</li>
+  <li>There is no approval of members by an administrator: any valid account with a quota can register its own nodes (a known limit from ARCHITECTURE.md).</li>
+</ul>
+
+<h3>12.2 Metadata and anonymity</h3>
+<ul>
+  <li>The protocol <strong>does not hide identity</strong>: <code>node_id_i</code> is in the clear in INIT, <code>receiver_idx</code> and the counter are in the clear in every packet, PUNCH contains the <code>node_id</code> in the clear.</li>
+  <li>Packet sizes, timing, volume and the counter remain visible; <strong>there is no padding, cover traffic or mixing</strong>. Types of traffic can be inferred from size and timing.</li>
+  <li>The registry and the other members learn the public IP address of every node (the endpoints are published). The oneqrelay sees the (source, destination) pair and the volume of the traffic that passes through it. A delegated node sees the encrypted packets and the pairs it serves.</li>
+  <li>It does not offer anonymity in the Tor/mixnet sense and does not claim deniability.</li>
+</ul>
+
+<h3>12.3 Availability</h3>
+<ul>
+  <li>It does not guarantee availability. An on-path attacker can delete, delay or redirect packets; the oneqrelay or a delegated node can deny service.</li>
+  <li><strong>Asymmetric cost at INIT:</strong> before verifying the tag, the responder performs one ML-KEM decapsulation and two X25519 operations. The only defense is the token bucket (10 + 5/s). It is <strong>per node, not per peer</strong>: whoever knows a member <code>node_id</code> (visible in the clear in any INIT) can send false INITs that consume the tokens and delay legitimate handshakes.</li>
+  <li><strong>PUNCH and address redirection:</strong> an unauthenticated PUNCH can force a re-handshake by the initiator (at most once every 5 s per peer, only for sessions &gt; 3 s old). The peer's address is updated at the first authenticated packet received from a different source (as in WireGuard) and when a new session is installed; an attacker who retransmits a <em>valid, not yet marked</em> packet from another address can temporarily redirect the traffic, without being able to read or modify it.</li>
+</ul>
+
+<h3>12.4 Replay and clocks</h3>
+<ul>
+  <li><code>last_ts</code> (the anti-replay for INIT) is only in memory. After the responder restarts, an INIT captured within the last 180 s can be replayed: the responder installs a session (and sends RESP) that the legitimate initiator no longer knows; the traffic sent by the responder <em>may</em> be dropped by the initiator until the next handshake (at most ~120 s, or sooner through a PUNCH). The attacker obtains no keys.</li>
+  <li>The protocol relies on the local clock at handshake time: an offset &gt; 180 s between two nodes makes the handshake fail. There is no secure time.</li>
+</ul>
+
+<h3>12.5 Quantum security: what it covers and what it does not</h3>
+<ul>
+  <li>The hybrid protects the <strong>confidentiality</strong> of recorded sessions (Q1) if ML-KEM-768 holds up. There is no formal proof of the combiner (concatenation + HKDF with transcript); the argument in 11.4 is informal.</li>
+  <li>An active quantum adversary (Q2) that breaks X25519 in real time can forge an INIT (see 11.4); it does not obtain transport keys, but can produce unwanted state at the responder.</li>
+  <li><strong>TLS to the registry</strong> has the hybrid key exchange, but <strong>the certificates are classical</strong>: the authentication of the registry is not post-quantum. Passwords, tokens (HMAC, 1 h) and the federation secret are not part of this protocol.</li>
+  <li>Formal resistance to KCI (key-compromise impersonation) is not claimed and there is no analysis of "unknown key share" attacks.</li>
+</ul>
+
+<h3>12.6 Compromise of nodes and keys</h3>
+<ul>
+  <li>The static private key is stored in a file, <strong>unencrypted</strong> (the Python implementation refuses to load it if the group or others have access on Unix). Whoever reads it can impersonate the node until it is revoked in the registry. Revocation is done only through the registry and propagates after replication (seconds).</li>
+  <li>There is no post-compromise recovery other than a new handshake with the same static key: if the attacker has the static key, he can establish new sessions as that node. Forward secrecy (11.4) protects only sessions concluded before the compromise.</li>
+  <li>The implementations do not guarantee erasure of ephemeral secrets from memory (Python: no; Rust: as far as the crates used allow) nor constant-time execution beyond what the libraries provide.</li>
+</ul>
+
+<h3>12.7 What happens after decryption</h3>
+<ul>
+  <li>The protocol authenticates the <em>peer</em>, not the L2 content. A malicious member (M1) can send any Ethernet frame (ARP/DHCP/IPv6 ND, broadcast floods) with its own MAC address. The only rule applied is that a member cannot use the <em>registered</em> MAC of another member. There are no access lists, isolation between members or protocol filtering inside the community.</li>
+  <li>A delegated node (D1) cannot read or modify the datagrams, but can delete, delay or duplicate them (duplicates are rejected by the recipient's anti-replay window). It can use <code>NACK</code> labels to make members avoid a path.</li>
+</ul>
+
+<h3>12.8 Protocol and evolution</h3>
+<ul>
+  <li><strong>No negotiation</strong> of version or algorithms: a format change means a new <code>LABEL</code> and new types; v1 and v2 nodes do not interoperate. There is no mechanism for gradually moving a network between versions.</li>
+  <li>The zero nonce of the handshake is safe only because <code>k1</code> and <code>k2</code> are used a single time; any change to the protocol that would reuse these keys would break security.</li>
+    <li>Full mesh: n² sessions; designed for tens of nodes.</li>
+</ul>
+
+<h3>12.9 Process guarantees</h3>
+<ul>
+  <li>There is no independent audit, no formal proof (for example ProVerif/Tamarin) and no systematic fuzzing. See section 13 for what <em>was</em> verified.</li>
+</ul>
+
+<!-- ===================================================================== 13 -->
+<h2 id="ver">13. Verification and conformance</h2>
+<p>What was actually verified for this document:</p>
+<ul>
+  <li><code>spec_check.py</code> (in the repository root) contains an <strong>independent</strong> implementation, written only from the formulas of sections 4–6 and 8 (no import from the oneq code). Run on an Intel Mac (Python 3.13.16, OpenSSL 3.5.9, <code>cryptography</code> 48.x), against <code>meshproto.py</code> in both roles, it confirmed: the INIT (2349 B) and RESP (2233 B) lengths; equality of <code>ck1</code> and <code>h2</code> at the responder; equality of the transport keys in both directions; a DATA packet and an RLY packet built according to §4.3 accepted by the implementation and vice versa; rejection of an INIT and of a RESP with one modified bit.</li>
+  <li>The Rust client (<code>client/core/src/wire.rs</code>) uses the same <code>LABEL</code>, HKDF info, types, lengths and constants (verified by inspection and by its unit tests, which assert the lengths 2349/2233 and the types); <code>spec_check.py</code> was not run against it, and Python ↔ Rust compatibility is exercised by the project's laboratory tests and real nodes.</li>
+</ul>
+<p>What was <strong>not</strong> verified: known-answer test vectors (the handshake uses random ephemeral keys and has no deterministic mode), formal analysis, fuzzing, resistance to side-channel attacks, behavior under memory limits.</p>
+<p>To redo the verification: <code>python3 spec_check.py</code> with <code>meshproto.py</code>, <code>oneqtunel.py</code>, <code>pqtls.py</code> alongside (Linux or macOS; <code>cryptography</code> ≥ 46).</p>
+
+<footer>
+  specifications.html · tunmesh-pq/v2 · generated from the code of the oneq repository at commit <code>e4e13eb</code> (spec_check.py added later) ·
+  technical document, not a promise of security.
+</footer>
+
+</div>
+</body>
+</html>

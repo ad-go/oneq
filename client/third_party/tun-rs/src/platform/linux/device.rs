@@ -1,0 +1,1340 @@
+use crate::platform::linux::offload::{
+    gso_none_checksum, gso_split, gso_transport_protocol, handle_gro, VirtioNetHdr,
+    VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_LEN,
+};
+use crate::platform::unix::device::{ctl, ctl_v6};
+use crate::platform::{ExpandBuffer, GROTable};
+use crate::{
+    builder::{DeviceConfig, Layer},
+    platform::linux::sys::*,
+    platform::{
+        unix::{ipaddr_to_sockaddr, sockaddr_union, Fd, Tun},
+        ETHER_ADDR_LEN,
+    },
+    ToIpv6Address, ToIpv6Netmask,
+};
+#[cfg(feature = "address-management")]
+use crate::{ToIpv4Address, ToIpv4Netmask};
+#[cfg(feature = "address-management")]
+use ipnet::IpNet;
+use libc::{
+    self, c_char, c_short, ifreq, in6_ifreq, ARPHRD_ETHER, IFF_MULTI_QUEUE, IFF_NO_PI, IFF_RUNNING,
+    IFF_TAP, IFF_TUN, IFF_UP, IFNAMSIZ, O_RDWR,
+};
+use std::net::Ipv6Addr;
+use std::sync::{Arc, RwLock};
+use std::{
+    ffi::CString,
+    io, mem,
+    net::{IpAddr, Ipv4Addr},
+    os::unix::io::{AsRawFd, RawFd},
+    ptr,
+};
+
+const OVERWRITE_SIZE: usize = mem::size_of::<libc::__c_anonymous_ifr_ifru>();
+
+/// A TUN device using the TUN/TAP Linux driver.
+pub struct DeviceImpl {
+    pub(crate) tun: Tun,
+    pub(crate) vnet_hdr: bool,
+    pub(crate) udp_gso: bool,
+    flags: c_short,
+    pub(crate) op_lock: Arc<RwLock<()>>,
+}
+
+impl DeviceImpl {
+    /// Create a new `Device` for the given `Configuration`.
+    pub(crate) fn new(config: DeviceConfig) -> std::io::Result<Self> {
+        let dev_name = match config.dev_name.as_ref() {
+            Some(tun_name) => {
+                let tun_name = CString::new(tun_name.clone())?;
+
+                if tun_name.as_bytes_with_nul().len() > IFNAMSIZ {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "device name too long",
+                    ));
+                }
+
+                Some(tun_name)
+            }
+
+            None => None,
+        };
+
+        // Create the device node if it is missing.
+        // Silently ignore errors, let opening the device report an error.
+        // This way, we don't fail if someone races us to create the device node.
+        if let Ok(false) = std::fs::exists("/dev/net/tun") {
+            std::fs::create_dir_all("/dev/net").ok();
+            unsafe {
+                libc::mknod(
+                    c"/dev/net/tun".as_ptr(),
+                    0o666 | libc::S_IFCHR,
+                    libc::makedev(10, 200),
+                );
+            }
+        }
+
+        unsafe {
+            let mut req: ifreq = mem::zeroed();
+
+            if let Some(dev_name) = dev_name.as_ref() {
+                ptr::copy_nonoverlapping(
+                    dev_name.as_ptr() as *const c_char,
+                    req.ifr_name.as_mut_ptr(),
+                    dev_name.as_bytes_with_nul().len(),
+                );
+            }
+            let multi_queue = config.multi_queue.unwrap_or(false);
+            let device_type: c_short = config.layer.unwrap_or(Layer::L3).into();
+            let iff_no_pi = IFF_NO_PI as c_short;
+            let iff_vnet_hdr = libc::IFF_VNET_HDR as c_short;
+            let iff_multi_queue = IFF_MULTI_QUEUE as c_short;
+            let packet_information = config.packet_information.unwrap_or(false);
+            let offload = config.offload.unwrap_or(false);
+            if packet_information && offload {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Linux packet_information and offload cannot be enabled together",
+                ));
+            }
+            req.ifr_ifru.ifru_flags = device_type
+                | if packet_information { 0 } else { iff_no_pi }
+                | if multi_queue { iff_multi_queue } else { 0 }
+                | if offload { iff_vnet_hdr } else { 0 };
+
+            let fd = libc::open(
+                c"/dev/net/tun".as_ptr() as *const _,
+                O_RDWR | libc::O_CLOEXEC,
+                0,
+            );
+            let tun_fd = Fd::new(fd)?;
+            if let Err(err) = tunsetiff(tun_fd.inner, &mut req as *mut _ as *mut _) {
+                return Err(io::Error::from(err));
+            }
+            let (vnet_hdr, udp_gso) = if offload && libc::IFF_VNET_HDR != 0 {
+                // tunTCPOffloads were added in Linux v2.6. We require their support if IFF_VNET_HDR is set.
+                let tun_tcp_offloads = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
+                let tun_udp_offloads = libc::TUN_F_USO4 | libc::TUN_F_USO6;
+                tunsetoffload(tun_fd.inner, tun_tcp_offloads as _).map_err(io::Error::from)?;
+                // tunUDPOffloads were added in Linux v6.2. We do not return an
+                // error if they are unsupported at runtime.
+                let rs = tunsetoffload(tun_fd.inner, (tun_tcp_offloads | tun_udp_offloads) as _);
+                (true, rs.is_ok())
+            } else {
+                // The TUN_F_* offload mask is device-wide state, not
+                // per-fd. When attaching to a persistent TUN that a
+                // previous process configured with offload=true, the
+                // mask remains set across detaches: the kernel will
+                // still deliver GSO aggregates to this new fd even
+                // though IFF_VNET_HDR is not set, and the offload-
+                // unaware caller will read them as oversized single
+                // packets (ping survives, TCP bulk transfer fails).
+                // Explicitly reset the mask. No-op on a freshly
+                // created device (mask is already zero). If this fails we
+                // cannot safely expose the fd as an offload-unaware device:
+                // stale device-wide GSO state can otherwise deliver packets
+                // whose framing this instance does not understand.
+                tunsetoffload(tun_fd.inner, 0 as _).map_err(io::Error::from)?;
+                (false, false)
+            };
+
+            let device = DeviceImpl {
+                tun: Tun::new(tun_fd),
+                vnet_hdr,
+                udp_gso,
+                flags: req.ifr_ifru.ifru_flags,
+                op_lock: Arc::new(RwLock::new(())),
+            };
+            Ok(device)
+        }
+    }
+    unsafe fn set_tcp_offloads(&self) -> io::Result<()> {
+        let tun_tcp_offloads = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
+        // SAFETY: self owns a live TUN descriptor and the offload mask is composed of TUN_F_* flags.
+        unsafe { tunsetoffload(self.as_raw_fd(), tun_tcp_offloads as _) }
+            .map(|_| ())
+            .map_err(|e| e.into())
+    }
+    unsafe fn set_tcp_udp_offloads(&self) -> io::Result<()> {
+        let tun_tcp_offloads = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
+        let tun_udp_offloads = libc::TUN_F_USO4 | libc::TUN_F_USO6;
+        // SAFETY: self owns a live TUN descriptor and the offload mask is composed of TUN_F_* flags.
+        unsafe { tunsetoffload(self.as_raw_fd(), (tun_tcp_offloads | tun_udp_offloads) as _) }
+            .map(|_| ())
+            .map_err(|e| e.into())
+    }
+    /// Wraps an arbitrary owned descriptor (socketpair, pipe) without the
+    /// `TUNGETIFF` validation so readiness behaviour can be tested without
+    /// privileges. The descriptor is closed when the device is dropped.
+    #[cfg(all(test, any(feature = "async_tokio", feature = "async_io")))]
+    pub(crate) fn from_fd_for_test(fd: RawFd) -> Self {
+        Self {
+            tun: Tun::new(unsafe { Fd::new_unchecked(fd) }),
+            vnet_hdr: false,
+            udp_gso: false,
+            flags: 0,
+            op_lock: Arc::new(RwLock::new(())),
+        }
+    }
+    pub(crate) fn from_tun(tun: Tun) -> io::Result<Self> {
+        let flags = tun_flags(tun.as_raw_fd())?;
+        validate_adopted_tun_flags(flags)?;
+
+        // TUNGETIFF cannot reliably recover IFF_NO_PI: Linux overlays the
+        // same returned bit as IFF_NOFILTER when no socket filter is attached.
+        // The public unsafe contract therefore requires adopted Linux fds to
+        // use plain IFF_NO_PI framing. Keep the legacy non-offload state here
+        // instead of guessing or mutating device-wide TUNSETOFFLOAD policy.
+        Ok(Self {
+            tun,
+            vnet_hdr: false,
+            udp_gso: false,
+            flags: 0,
+            op_lock: Arc::new(RwLock::new(())),
+        })
+    }
+
+    /// # Prerequisites
+    /// - The `IFF_MULTI_QUEUE` flag must be enabled.
+    /// - The system must support network interface multi-queue functionality.
+    ///
+    /// # Description
+    /// When multi-queue is enabled, create a new queue by duplicating an existing one.
+    pub(crate) fn try_clone(&self) -> io::Result<DeviceImpl> {
+        let flags = self.flags;
+        if flags & (IFF_MULTI_QUEUE as c_short) != IFF_MULTI_QUEUE as c_short {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "iff_multi_queue not enabled",
+            ));
+        }
+        unsafe {
+            let mut req = self.request()?;
+            req.ifr_ifru.ifru_flags = flags;
+            let fd = libc::open(
+                c"/dev/net/tun".as_ptr() as *const _,
+                O_RDWR | libc::O_CLOEXEC,
+            );
+            let tun_fd = Fd::new(fd)?;
+            if let Err(err) = tunsetiff(tun_fd.inner, &mut req as *mut _ as *mut _) {
+                return Err(io::Error::from(err));
+            }
+            let dev = DeviceImpl {
+                tun: Tun::new(tun_fd),
+                vnet_hdr: self.vnet_hdr,
+                udp_gso: self.udp_gso,
+                flags,
+                op_lock: self.op_lock.clone(),
+            };
+            if dev.vnet_hdr {
+                if dev.udp_gso {
+                    dev.set_tcp_udp_offloads()?
+                } else {
+                    dev.set_tcp_offloads()?;
+                }
+            }
+
+            Ok(dev)
+        }
+    }
+    /// Returns whether UDP Generic Segmentation Offload (GSO) is enabled.
+    ///
+    /// This is determined by the `udp_gso` flag in the device.
+    pub fn udp_gso(&self) -> bool {
+        self.udp_gso
+    }
+    /// Returns whether TCP Generic Segmentation Offload (GSO) is enabled.
+    ///
+    /// In this implementation, this is represented by the `vnet_hdr` flag.
+    pub fn tcp_gso(&self) -> bool {
+        self.vnet_hdr
+    }
+    /// Sets the transmit queue length for the network interface.
+    ///
+    /// This method constructs an interface request (`ifreq`) structure,
+    /// assigns the desired transmit queue length to the `ifru_metric` field,
+    /// and calls the `change_tx_queue_len` function using the control file descriptor.
+    /// If the underlying operation fails, an I/O error is returned.
+    pub fn set_tx_queue_len(&self, tx_queue_len: u32) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let mut ifreq = self.request()?;
+            ifreq.ifr_ifru.ifru_metric = tx_queue_len as _;
+            if let Err(err) = change_tx_queue_len(ctl()?.as_raw_fd(), &ifreq) {
+                return Err(io::Error::from(err));
+            }
+        }
+        Ok(())
+    }
+    /// Retrieves the current transmit queue length for the network interface.
+    ///
+    /// This function constructs an interface request structure and calls `tx_queue_len`
+    /// to populate it with the current transmit queue length. The value is then returned.
+    pub fn tx_queue_len(&self) -> io::Result<u32> {
+        let _guard = self.op_lock.read().unwrap();
+        unsafe {
+            let mut ifreq = self.request()?;
+            if let Err(err) = tx_queue_len(ctl()?.as_raw_fd(), &mut ifreq) {
+                return Err(io::Error::from(err));
+            }
+            Ok(ifreq.ifr_ifru.ifru_metric as _)
+        }
+    }
+    /// Make the device persistent.
+    ///
+    /// By default, TUN/TAP devices are destroyed when the process exits.
+    /// Calling this method makes the device persist after the program terminates,
+    /// allowing it to be reused by other processes.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .name("persistent-tun")
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Make the device persistent so it survives after program exit
+    /// dev.persist()?;
+    /// println!("Device will persist after program exits");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn persist(&self) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            if let Err(err) = tunsetpersist(self.as_raw_fd(), &1) {
+                Err(io::Error::from(err))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Set the owner (UID) of the device.
+    ///
+    /// This allows non-root users to access the TUN/TAP device.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Set ownership to UID 1000 (typical first user on Linux)
+    /// dev.user(1000)?;
+    /// println!("Device ownership set to UID 1000");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn user(&self, value: i32) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            if let Err(err) = tunsetowner(self.as_raw_fd(), &value) {
+                Err(io::Error::from(err))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Set the group (GID) of the device.
+    ///
+    /// This allows members of a specific group to access the TUN/TAP device.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Set group ownership to GID 1000
+    /// dev.group(1000)?;
+    /// println!("Device group ownership set to GID 1000");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn group(&self, value: i32) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            if let Err(err) = tunsetgroup(self.as_raw_fd(), &value) {
+                Err(io::Error::from(err))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    /// Sends multiple packets in a batch with GRO (Generic Receive Offload) coalescing.
+    ///
+    /// This method allows efficient transmission of multiple packets by batching them together
+    /// and applying GRO optimizations. When offload is enabled, packets may be coalesced
+    /// to reduce system call overhead and improve throughput.
+    ///
+    /// # Arguments
+    ///
+    /// * `gro_table` - A mutable reference to a [`GROTable`] that manages packet coalescing state.
+    ///   This table can be reused across multiple calls to amortize allocation overhead.
+    /// * `bufs` - A mutable slice of buffers containing the packets to send. Each buffer must
+    ///   implement the [`ExpandBuffer`] trait.
+    /// * `offset` - The byte offset within each buffer where the packet data begins.
+    ///   Must be >= `VIRTIO_NET_HDR_LEN` to accommodate the virtio network header when offload is enabled.
+    ///
+    /// # Returns
+    ///
+    /// Returns the total number of bytes successfully sent, or an I/O error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::{DeviceBuilder, GROTable, VIRTIO_NET_HDR_LEN};
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .with(|builder| {
+    ///         builder.offload(true); // Enable offload for GRO
+    ///     })
+    ///     .build_sync()?;
+    ///
+    /// let mut gro_table = GROTable::default();
+    /// let offset = VIRTIO_NET_HDR_LEN;
+    ///
+    /// // Prepare packets to send
+    /// let mut packet1 = vec![0u8; offset + 100]; // VIRTIO_NET_HDR + packet data
+    /// let mut packet2 = vec![0u8; offset + 200];
+    /// // Fill in packet data at offset...
+    ///
+    /// let mut bufs = vec![packet1, packet2];
+    ///
+    /// // Send all packets in one batch
+    /// let bytes_sent = dev.send_multiple(&mut gro_table, &mut bufs, offset)?;
+    /// println!("Sent {} bytes across {} packets", bytes_sent, bufs.len());
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    ///
+    /// # Platform
+    ///
+    /// This method is only available on Linux.
+    ///
+    /// # Performance Notes
+    ///
+    /// - Use `IDEAL_BATCH_SIZE` for optimal batch size (typically 128 packets)
+    /// - Reuse the same `GROTable` instance across calls to avoid allocations
+    /// - Enable offload via `.offload(true)` in `DeviceBuilder` for best performance
+    pub fn send_multiple<B: ExpandBuffer>(
+        &self,
+        gro_table: &mut GROTable,
+        bufs: &mut [B],
+        offset: usize,
+    ) -> io::Result<usize> {
+        self.send_multiple0(gro_table, bufs, offset, |tun, buf| tun.send(buf))
+    }
+    pub(crate) fn send_multiple0<B: ExpandBuffer, W: FnMut(&Tun, &[u8]) -> io::Result<usize>>(
+        &self,
+        gro_table: &mut GROTable,
+        bufs: &mut [B],
+        mut offset: usize,
+        mut write_f: W,
+    ) -> io::Result<usize> {
+        gro_table.reset();
+        if bufs.is_empty() {
+            return Ok(0);
+        }
+        if bufs.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many packet buffers",
+            ));
+        }
+        if self.vnet_hdr {
+            handle_gro(
+                bufs,
+                offset,
+                &mut gro_table.tcp_gro_table,
+                &mut gro_table.udp_gro_table,
+                self.udp_gso,
+                &mut gro_table.to_write,
+            )?;
+            offset -= VIRTIO_NET_HDR_LEN;
+        } else {
+            for i in 0..bufs.len() {
+                gro_table.to_write.push(i);
+            }
+        }
+
+        let mut total = 0;
+        let mut err = Ok(());
+        for buf_idx in &gro_table.to_write {
+            let Some(buf) = bufs[*buf_idx].as_ref().get(offset..) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            };
+            match write_f(&self.tun, buf) {
+                Ok(n) => {
+                    total += n;
+                }
+                Err(e) => {
+                    if let Some(code) = e.raw_os_error() {
+                        if libc::EBADFD == code {
+                            return Err(e);
+                        }
+                    }
+                    err = Err(e)
+                }
+            }
+        }
+        err?;
+        Ok(total)
+    }
+    /// Receives multiple packets in a batch with GSO (Generic Segmentation Offload) splitting.
+    ///
+    /// When offload is enabled, this method can receive large GSO packets from the TUN device
+    /// and automatically split them into MTU-sized segments, significantly improving receive
+    /// performance for high-bandwidth traffic.
+    ///
+    /// # Arguments
+    ///
+    /// * `original_buffer` - A mutable buffer to store the raw received data, including the
+    ///   virtio network header and the potentially large GSO packet. Recommended size is
+    ///   `VIRTIO_NET_HDR_LEN + 65535` bytes.
+    /// * `bufs` - A mutable slice of buffers to store the segmented packets. Each buffer will
+    ///   receive one MTU-sized packet after GSO splitting.
+    /// * `sizes` - A mutable slice to store the actual size of each packet in `bufs`.
+    ///   Must have the same length as `bufs`.
+    /// * `offset` - The byte offset within each output buffer where packet data should be written.
+    ///   This allows for pre-allocated header space.
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of packets successfully received and split, or an I/O error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::{DeviceBuilder, IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .with(|builder| {
+    ///         builder.offload(true); // Enable offload for GSO
+    ///     })
+    ///     .build_sync()?;
+    ///
+    /// // Buffer for the raw received packet (with virtio header)
+    /// let mut original_buffer = vec![0u8; VIRTIO_NET_HDR_LEN + 65535];
+    ///
+    /// // Output buffers for segmented packets
+    /// let mut bufs = vec![vec![0u8; 1500]; IDEAL_BATCH_SIZE];
+    /// let mut sizes = vec![0usize; IDEAL_BATCH_SIZE];
+    /// let offset = 0;
+    ///
+    /// loop {
+    ///     // Receive and segment packets
+    ///     let num_packets = dev.recv_multiple(&mut original_buffer, &mut bufs, &mut sizes, offset)?;
+    ///
+    ///     // Process each segmented packet
+    ///     for i in 0..num_packets {
+    ///         let packet = &bufs[i][offset..offset + sizes[i]];
+    ///         println!("Received packet {}: {} bytes", i, sizes[i]);
+    ///         // Process packet...
+    ///     }
+    /// }
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    ///
+    /// # Platform
+    ///
+    /// This method is only available on Linux.
+    ///
+    /// # Performance Notes
+    ///
+    /// - Use `IDEAL_BATCH_SIZE` (128) for the number of output buffers
+    /// - A single `recv_multiple` call may return multiple MTU-sized packets from one large GSO packet
+    /// - The performance benefit is most noticeable with TCP traffic using large send/receive windows
+    pub fn recv_multiple<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<usize> {
+        self.recv_multiple0(original_buffer, bufs, sizes, offset, |tun, buf| {
+            tun.recv(buf)
+        })
+    }
+    pub(crate) fn recv_multiple0<
+        B: AsRef<[u8]> + AsMut<[u8]>,
+        R: Fn(&Tun, &mut [u8]) -> io::Result<usize>,
+    >(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+        read_f: R,
+    ) -> io::Result<usize> {
+        if bufs.is_empty() || bufs.len() != sizes.len() {
+            return Err(io::Error::other("bufs error"));
+        }
+        if self.vnet_hdr {
+            let len = read_f(&self.tun, original_buffer)?;
+            if len <= VIRTIO_NET_HDR_LEN {
+                Err(io::Error::other(format!(
+                    "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                )))?
+            }
+            let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
+            self.handle_virtio_read(
+                hdr,
+                &mut original_buffer[VIRTIO_NET_HDR_LEN..len],
+                bufs,
+                sizes,
+                offset,
+            )
+        } else {
+            let Some(buf) = bufs[0].as_mut().get_mut(offset..) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            };
+            let len = read_f(&self.tun, buf)?;
+            sizes[0] = len;
+            Ok(1)
+        }
+    }
+    /// https://github.com/WireGuard/wireguard-go/blob/12269c2761734b15625017d8565745096325392f/tun/tun_linux.go#L375
+    /// handleVirtioRead splits in into bufs, leaving offset bytes at the front of
+    /// each buffer. It mutates sizes to reflect the size of each element of bufs,
+    /// and returns the number of packets read.
+    pub(crate) fn handle_virtio_read<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        mut hdr: VirtioNetHdr,
+        input: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<usize> {
+        if sizes.len() < bufs.len() {
+            return Err(io::Error::other("sizes must be at least as long as bufs"));
+        }
+        if bufs.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many packet buffers",
+            ));
+        }
+        for buf in bufs.iter() {
+            if offset > buf.as_ref().len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            }
+        }
+        let len = input.len();
+        if hdr.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+            if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                // This means CHECKSUM_PARTIAL in skb context. We are responsible
+                // for computing the checksum starting at hdr.csumStart and placing
+                // at hdr.csumOffset.
+                gso_none_checksum(input, hdr.csum_start, hdr.csum_offset);
+            }
+            if bufs[0].as_ref()[offset..].len() < len {
+                Err(io::Error::other(format!(
+                    "read len {len} overflows bufs element len {}",
+                    bufs[0].as_ref().len()
+                )))?
+            }
+            sizes[0] = len;
+            bufs[0].as_mut()[offset..offset + len].copy_from_slice(input);
+            return Ok(1);
+        }
+        if hdr.gso_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "virtioNetHdr.gsoSize must be non-zero",
+            ));
+        }
+        let Some(first_byte) = input.first() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "GSO packet is empty",
+            ));
+        };
+        let ip_version = first_byte >> 4;
+        let is_v6 = match ip_version {
+            4 => false,
+            6 => true,
+            ip_version => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid ip header version: {ip_version}"),
+                ));
+            }
+        };
+        let transport_protocol = gso_transport_protocol(hdr.gso_type, is_v6)?;
+        // Don't trust hdr.hdrLen from the kernel as it can be equal to the length
+        // of the entire first packet when the kernel is handling it as part of a
+        // FORWARD path. Instead, parse the transport header length and add it onto
+        // csumStart, which is synonymous for IP header length.
+        if transport_protocol == libc::IPPROTO_UDP {
+            hdr.hdr_len = hdr.csum_start.checked_add(8).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "UDP header length overflow")
+            })?;
+        } else {
+            if len <= hdr.csum_start as usize + 12 {
+                Err(io::Error::other("packet is too short"))?
+            }
+
+            let tcp_h_len = ((input[hdr.csum_start as usize + 12] as u16) >> 4) * 4;
+            if !(20..=60).contains(&tcp_h_len) {
+                // A TCP header must be between 20 and 60 bytes in length.
+                Err(io::Error::other(format!(
+                    "tcp header len is invalid: {tcp_h_len}"
+                )))?
+            }
+            hdr.hdr_len = hdr.csum_start.checked_add(tcp_h_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "TCP header length overflow")
+            })?;
+        }
+        if len < hdr.hdr_len as usize {
+            Err(io::Error::other(format!(
+                "length of packet ({len}) < virtioNetHdr.hdr_len ({})",
+                hdr.hdr_len
+            )))?
+        }
+        if hdr.hdr_len < hdr.csum_start {
+            Err(io::Error::other(format!(
+                "virtioNetHdr.hdrLen ({}) < virtioNetHdr.csumStart ({})",
+                hdr.hdr_len, hdr.csum_start
+            )))?
+        }
+        let c_sum_at = usize::from(hdr.csum_start) + usize::from(hdr.csum_offset);
+        if c_sum_at
+            .checked_add(1)
+            .is_none_or(|csum_end| csum_end > len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "checksum field exceeds packet length",
+            ));
+        }
+        gso_split(input, hdr, bufs, sizes, offset, is_v6)
+    }
+    pub fn remove_address_v6_impl(&self, addr: Ipv6Addr, prefix: u8) -> io::Result<()> {
+        unsafe {
+            let if_index = self.if_index_impl()?;
+            let ctl = ctl_v6()?;
+            let mut ifrv6: in6_ifreq = mem::zeroed();
+            ifrv6.ifr6_ifindex = if_index as i32;
+            ifrv6.ifr6_prefixlen = prefix as _;
+            ifrv6.ifr6_addr = sockaddr_union::from(std::net::SocketAddr::new(addr.into(), 0))
+                .addr6
+                .sin6_addr;
+            if let Err(err) = siocdifaddr_in6(ctl.as_raw_fd(), &ifrv6) {
+                return Err(io::Error::from(err));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DeviceImpl {
+    /// Prepare a new request.
+    unsafe fn request(&self) -> io::Result<ifreq> {
+        // SAFETY: this method forwards the same interface-name validity contract to request().
+        unsafe { request(&self.name_impl()?) }
+    }
+    fn set_address_v4(&self, addr: Ipv4Addr) -> io::Result<()> {
+        unsafe {
+            let mut req = self.request()?;
+            ipaddr_to_sockaddr(addr, 0, (&raw mut req.ifr_ifru).cast(), OVERWRITE_SIZE);
+            if let Err(err) = siocsifaddr(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+        }
+        Ok(())
+    }
+    fn set_netmask(&self, value: Ipv4Addr) -> io::Result<()> {
+        unsafe {
+            let mut req = self.request()?;
+            ipaddr_to_sockaddr(value, 0, (&raw mut req.ifr_ifru).cast(), OVERWRITE_SIZE);
+            if let Err(err) = siocsifnetmask(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+            Ok(())
+        }
+    }
+
+    fn set_destination(&self, value: Ipv4Addr) -> io::Result<()> {
+        unsafe {
+            let mut req = self.request()?;
+            ipaddr_to_sockaddr(value, 0, (&raw mut req.ifr_ifru).cast(), OVERWRITE_SIZE);
+            if let Err(err) = siocsifdstaddr(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(not(feature = "address-management"))]
+    pub(crate) fn configure_initial_ipv4(
+        &self,
+        address: Ipv4Addr,
+        prefix: u8,
+        destination: Option<Ipv4Addr>,
+    ) -> io::Result<()> {
+        if prefix > 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv4 prefix length exceeds 32",
+            ));
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - u32::from(prefix))
+        };
+        self.set_address_v4(address)?;
+        self.set_netmask(Ipv4Addr::from(mask))?;
+        if let Some(destination) = destination {
+            self.set_destination(destination)?;
+        }
+        Ok(())
+    }
+
+    /// Retrieves the name of the network interface.
+    pub(crate) fn name_impl(&self) -> io::Result<String> {
+        unsafe { name(self.as_raw_fd()) }
+    }
+
+    fn ifru_flags(&self) -> io::Result<i16> {
+        unsafe {
+            let ctl = ctl()?;
+            let mut req = self.request()?;
+
+            if let Err(err) = siocgifflags(ctl.as_raw_fd(), &mut req) {
+                return Err(io::Error::from(err));
+            }
+            Ok(req.ifr_ifru.ifru_flags)
+        }
+    }
+
+    #[cfg(feature = "address-management")]
+    fn remove_all_address_v4(&self) -> io::Result<()> {
+        let interface = netconfig_rs::Interface::try_from_index(self.if_index_impl()?)
+            .map_err(io::Error::from)?;
+        let list = interface.addresses().map_err(io::Error::from)?;
+        for x in list {
+            if x.addr().is_ipv4() {
+                interface.remove_address(x).map_err(io::Error::from)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+//Public User Interface
+impl DeviceImpl {
+    /// Retrieves the name of the network interface.
+    pub fn name(&self) -> io::Result<String> {
+        let _guard = self.op_lock.read().unwrap();
+        self.name_impl()
+    }
+    pub fn remove_address_v6(&self, addr: Ipv6Addr, prefix: u8) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        self.remove_address_v6_impl(addr, prefix)
+    }
+    /// Sets a new name for the network interface.
+    ///
+    /// This function converts the provided name into a C-compatible string,
+    /// checks that its length does not exceed the maximum allowed (IFNAMSIZ),
+    /// and then copies it into an interface request structure. It then uses a system call
+    /// (via `siocsifname`) to apply the new name.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .name("tun0")
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Rename the device
+    /// dev.set_name("vpn-tun")?;
+    /// println!("Device renamed to vpn-tun");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn set_name(&self, value: &str) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let tun_name = CString::new(value)?;
+
+            if tun_name.as_bytes_with_nul().len() > IFNAMSIZ {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "name too long"));
+            }
+
+            let mut req = self.request()?;
+            ptr::copy_nonoverlapping(
+                tun_name.as_ptr() as *const c_char,
+                req.ifr_ifru.ifru_newname.as_mut_ptr(),
+                value.len(),
+            );
+
+            if let Err(err) = siocsifname(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+
+            Ok(())
+        }
+    }
+    /// Checks whether the network interface is currently running.
+    ///
+    /// The interface is considered running if both the IFF_UP and IFF_RUNNING flags are set.
+    pub fn is_running(&self) -> io::Result<bool> {
+        let _guard = self.op_lock.read().unwrap();
+        let flags = self.ifru_flags()?;
+        Ok(flags & (IFF_UP | IFF_RUNNING) as c_short == (IFF_UP | IFF_RUNNING) as c_short)
+    }
+    /// Enables or disables the network interface.
+    ///
+    /// If `value` is true, the interface is enabled by setting the IFF_UP and IFF_RUNNING flags.
+    /// If false, the IFF_UP flag is cleared. The change is applied using a system call.
+    pub fn enabled(&self, value: bool) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let ctl = ctl()?;
+            let mut req = self.request()?;
+
+            if let Err(err) = siocgifflags(ctl.as_raw_fd(), &mut req) {
+                return Err(io::Error::from(err));
+            }
+
+            if value {
+                req.ifr_ifru.ifru_flags |= (IFF_UP | IFF_RUNNING) as c_short;
+            } else {
+                req.ifr_ifru.ifru_flags &= !(IFF_UP as c_short);
+            }
+
+            if let Err(err) = siocsifflags(ctl.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+
+            Ok(())
+        }
+    }
+    /// Retrieves the broadcast address of the network interface.
+    ///
+    /// This function populates an interface request with the broadcast address via a system call,
+    /// converts it into a sockaddr structure, and then extracts the IP address.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Get the broadcast address
+    /// let broadcast = dev.broadcast()?;
+    /// println!("Broadcast address: {}", broadcast);
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn broadcast(&self) -> io::Result<IpAddr> {
+        let _guard = self.op_lock.read().unwrap();
+        unsafe {
+            let mut req = self.request()?;
+            if let Err(err) = siocgifbrdaddr(ctl()?.as_raw_fd(), &mut req) {
+                return Err(io::Error::from(err));
+            }
+            let sa = sockaddr_union::from(req.ifr_ifru.ifru_broadaddr);
+            Ok(std::net::SocketAddr::try_from(sa)?.ip())
+        }
+    }
+    /// Sets the broadcast address of the network interface.
+    ///
+    /// This function converts the given IP address into a sockaddr structure (with a specified overwrite size)
+    /// and then applies it to the interface via a system call.
+    pub fn set_broadcast(&self, value: IpAddr) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let mut req = self.request()?;
+            ipaddr_to_sockaddr(value, 0, (&raw mut req.ifr_ifru).cast(), OVERWRITE_SIZE);
+            if let Err(err) = siocsifbrdaddr(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+            Ok(())
+        }
+    }
+    /// Sets the IPv4 network address, netmask, and an optional destination address.
+    /// Remove all previous set IPv4 addresses and set the specified address.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Change the primary IPv4 address
+    /// dev.set_network_address("10.1.0.1", 24, None)?;
+    /// println!("Updated device address to 10.1.0.1/24");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    #[cfg(feature = "address-management")]
+    pub fn set_network_address<IPv4: ToIpv4Address, Netmask: ToIpv4Netmask>(
+        &self,
+        address: IPv4,
+        netmask: Netmask,
+        destination: Option<IPv4>,
+    ) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        self.remove_all_address_v4()?;
+        self.set_address_v4(address.ipv4()?)?;
+        self.set_netmask(netmask.netmask()?)?;
+        if let Some(destination) = destination {
+            self.set_destination(destination.ipv4()?)?;
+        }
+        Ok(())
+    }
+    /// Add IPv4 network address and netmask to the interface.
+    ///
+    /// This allows multiple IPv4 addresses on a single TUN/TAP device.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Add additional IPv4 addresses
+    /// dev.add_address_v4("10.0.1.1", 24)?;
+    /// dev.add_address_v4("10.0.2.1", 24)?;
+    /// println!("Added multiple IPv4 addresses");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    #[cfg(feature = "address-management")]
+    pub fn add_address_v4<IPv4: ToIpv4Address, Netmask: ToIpv4Netmask>(
+        &self,
+        address: IPv4,
+        netmask: Netmask,
+    ) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        let interface = netconfig_rs::Interface::try_from_index(self.if_index_impl()?)
+            .map_err(io::Error::from)?;
+        interface
+            .add_address(IpNet::new_assert(address.ipv4()?.into(), netmask.prefix()?))
+            .map_err(io::Error::from)
+    }
+    /// Removes an IP address from the interface.
+    ///
+    /// For IPv4 addresses, it iterates over the current addresses and if a match is found,
+    /// resets the address to `0.0.0.0` (unspecified).
+    /// For IPv6 addresses, it retrieves the interface addresses by name and removes the matching address,
+    /// taking into account its prefix length.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use std::net::IpAddr;
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Add an additional address
+    /// dev.add_address_v4("10.0.1.1", 24)?;
+    ///
+    /// // Later, remove it
+    /// dev.remove_address("10.0.1.1".parse::<IpAddr>().unwrap())?;
+    /// println!("Removed address 10.0.1.1");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    #[cfg(feature = "address-management")]
+    pub fn remove_address(&self, addr: IpAddr) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        match addr {
+            IpAddr::V4(_) => {
+                let interface = netconfig_rs::Interface::try_from_index(self.if_index_impl()?)
+                    .map_err(io::Error::from)?;
+                let list = interface.addresses().map_err(io::Error::from)?;
+                for x in list {
+                    if x.addr() == addr {
+                        interface.remove_address(x).map_err(io::Error::from)?;
+                    }
+                }
+            }
+            IpAddr::V6(addr_v6) => {
+                let addrs = crate::platform::get_if_addrs_by_name(self.name_impl()?)?;
+                for x in addrs {
+                    if let Some(ip_addr) = x.address.ip_addr() {
+                        if ip_addr == addr {
+                            if let Some(netmask) = x.address.netmask() {
+                                let prefix = ipnet::ip_mask_to_prefix(netmask).unwrap_or(0);
+                                self.remove_address_v6_impl(addr_v6, prefix)?
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Adds an IPv6 address to the interface.
+    ///
+    /// This function creates an `in6_ifreq` structure, fills in the interface index,
+    /// prefix length, and IPv6 address (converted into a sockaddr structure),
+    /// and then applies it using a system call.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_sync()?;
+    ///
+    /// // Add IPv6 addresses
+    /// dev.add_address_v6("fd00::1", 64)?;
+    /// dev.add_address_v6("fd00::2", 64)?;
+    /// println!("Added IPv6 addresses");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn add_address_v6<IPv6: ToIpv6Address, Netmask: ToIpv6Netmask>(
+        &self,
+        addr: IPv6,
+        netmask: Netmask,
+    ) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let if_index = self.if_index_impl()?;
+            let ctl = ctl_v6()?;
+            let mut ifrv6: in6_ifreq = mem::zeroed();
+            ifrv6.ifr6_ifindex = if_index as i32;
+            ifrv6.ifr6_prefixlen = netmask.prefix()? as u32;
+            ifrv6.ifr6_addr =
+                sockaddr_union::from(std::net::SocketAddr::new(addr.ipv6()?.into(), 0))
+                    .addr6
+                    .sin6_addr;
+            if let Err(err) = siocsifaddr_in6(ctl.as_raw_fd(), &ifrv6) {
+                return Err(io::Error::from(err));
+            }
+        }
+        Ok(())
+    }
+    /// Retrieves the current MTU (Maximum Transmission Unit) for the interface.
+    ///
+    /// This function constructs an interface request and uses a system call (via `siocgifmtu`)
+    /// to obtain the MTU. The result is then converted to a u16.
+    pub fn mtu(&self) -> io::Result<u16> {
+        let _guard = self.op_lock.read().unwrap();
+        unsafe {
+            let mut req = self.request()?;
+
+            if let Err(err) = siocgifmtu(ctl()?.as_raw_fd(), &mut req) {
+                return Err(io::Error::from(err));
+            }
+
+            req.ifr_ifru
+                .ifru_mtu
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))
+        }
+    }
+    /// Sets the MTU (Maximum Transmission Unit) for the interface.
+    ///
+    /// This function creates an interface request, sets the `ifru_mtu` field to the new value,
+    /// and then applies it via a system call.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// # {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .mtu(1400)
+    ///     .build_sync()?;
+    ///
+    /// // Change MTU to accommodate larger packets
+    /// dev.set_mtu(9000)?; // Jumbo frames
+    /// println!("MTU set to 9000 bytes");
+    /// # }
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn set_mtu(&self, value: u16) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let mut req = self.request()?;
+            req.ifr_ifru.ifru_mtu = value as i32;
+
+            if let Err(err) = siocsifmtu(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+            Ok(())
+        }
+    }
+    /// Sets the MAC (hardware) address for the interface.
+    ///
+    /// This function constructs an interface request and copies the provided MAC address
+    /// into the hardware address field. It then applies the change via a system call.
+    /// This operation is typically supported only for TAP devices.
+    pub fn set_mac_address(&self, eth_addr: [u8; ETHER_ADDR_LEN as usize]) -> io::Result<()> {
+        let _guard = self.op_lock.write().unwrap();
+        unsafe {
+            let mut req = self.request()?;
+            req.ifr_ifru.ifru_hwaddr.sa_family = ARPHRD_ETHER;
+            req.ifr_ifru.ifru_hwaddr.sa_data[0..ETHER_ADDR_LEN as usize]
+                .copy_from_slice(eth_addr.map(|c| c as _).as_slice());
+            if let Err(err) = siocsifhwaddr(ctl()?.as_raw_fd(), &req) {
+                return Err(io::Error::from(err));
+            }
+            Ok(())
+        }
+    }
+    /// Retrieves the MAC (hardware) address of the interface.
+    ///
+    /// This function queries the MAC address by the interface name using a helper function.
+    /// An error is returned if the MAC address cannot be found.
+    pub fn mac_address(&self) -> io::Result<[u8; ETHER_ADDR_LEN as usize]> {
+        let _guard = self.op_lock.read().unwrap();
+        unsafe {
+            let mut req = self.request()?;
+
+            siocgifhwaddr(ctl()?.as_raw_fd(), &mut req).map_err(io::Error::from)?;
+
+            let hw = &req.ifr_ifru.ifru_hwaddr.sa_data;
+
+            let mut mac = [0u8; ETHER_ADDR_LEN as usize];
+            for (i, b) in hw.iter().take(6).enumerate() {
+                mac[i] = *b as u8;
+            }
+
+            Ok(mac)
+        }
+    }
+}
+
+fn tun_flags(fd: RawFd) -> io::Result<c_short> {
+    unsafe {
+        let mut req: ifreq = mem::zeroed();
+        tungetiff(fd, &mut req as *mut _ as *mut _).map_err(io::Error::from)?;
+        Ok(req.ifr_ifru.ifru_flags)
+    }
+}
+
+fn validate_adopted_tun_flags(flags: c_short) -> io::Result<()> {
+    if flags & (libc::IFF_VNET_HDR as c_short) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Linux raw-fd adoption does not support IFF_VNET_HDR; use an explicitly configured device instead",
+        ));
+    }
+    Ok(())
+}
+
+unsafe fn name(fd: RawFd) -> io::Result<String> {
+    // SAFETY: ifreq is C request storage that is initialized by TUNGETIFF below.
+    let mut req: ifreq = unsafe { mem::zeroed() };
+    // SAFETY: the caller provides a live TUN fd and req is writable request storage.
+    if let Err(err) = unsafe { tungetiff(fd, &mut req as *mut _ as *mut _) } {
+        return Err(io::Error::from(err));
+    }
+    // SAFETY: successful TUNGETIFF initializes ifr_name as a NUL-terminated interface name.
+    let c_str = unsafe { std::ffi::CStr::from_ptr(req.ifr_name.as_ptr() as *const c_char) };
+    let tun_name = c_str.to_string_lossy().into_owned();
+    Ok(tun_name)
+}
+
+unsafe fn request(name: &str) -> io::Result<ifreq> {
+    // SAFETY: ifreq is C request storage and callers guarantee name fits ifr_name.
+    let mut req: ifreq = unsafe { mem::zeroed() };
+    // SAFETY: source and destination are non-overlapping and the caller guarantees the copy fits.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            name.as_ptr() as *const c_char,
+            req.ifr_name.as_mut_ptr(),
+            name.len(),
+        );
+    }
+    Ok(req)
+}
+
+impl From<Layer> for c_short {
+    fn from(layer: Layer) -> Self {
+        match layer {
+            Layer::L2 => IFF_TAP as c_short,
+            Layer::L3 => IFF_TUN as c_short,
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_fd_contract_tests {
+    use super::validate_adopted_tun_flags;
+    use std::io;
+
+    #[test]
+    fn adopted_raw_fd_rejects_virtio_header_framing() {
+        assert!(validate_adopted_tun_flags(0).is_ok());
+        assert!(matches!(
+            validate_adopted_tun_flags(libc::IFF_VNET_HDR as libc::c_short),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+    }
+}

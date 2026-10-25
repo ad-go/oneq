@@ -1,0 +1,48 @@
+[package]
+name = "oneq-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oneq-core = { path = "../core" }
+
+[patch.crates-io]
+tun-rs = { path = "../third_party/tun-rs" }
+route_manager = { path = "../third_party/route_manager" }
+
+[workspace]
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "transport"
+path = "fuzz_targets/transport.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fragments"
+path = "fuzz_targets/fragments.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "registry_json"
+path = "fuzz_targets/registry_json.rs"
+test = false
+doc = false

@@ -1,0 +1,4 @@
+#!/bin/sh
+# oneqnode: node of the oneq post-quantum layer-2 mesh. The Python libraries are bundled.
+export PYTHONPATH=/opt/oneq/node:/opt/oneq/node/site-packages${PYTHONPATH:+:$PYTHONPATH}
+exec /usr/bin/python3 /opt/oneq/node/oneqnode.py "$@"

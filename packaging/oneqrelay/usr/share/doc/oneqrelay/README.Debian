@@ -1,0 +1,65 @@
+oneqrelay on Debian
+===================
+
+The package installs the oneqrelay server (federated registry + relay) in /opt/oneq/relay, as a systemd service or as a
+supervisord program, with the dedicated unprivileged user "oneqrelay" (no capabilities). The Python libraries are bundled
+in the package. The commands oneqrelay and oneqrelay-admin are in PATH (links to /opt/oneq/relay/bin).
+
+Requirements: Debian 13 (Python 3.13, OpenSSL >= 3.5). Otherwise apt refuses to install it.
+
+Configuration: /etc/oneq/relay.conf
+-----------------------------------
+An INI file (comments with # or ;) read by the application. Command-line options override it; a misspelled option stops the
+service with a clear message. After any change:
+
+  sudo systemctl restart oneqrelay        or        sudo supervisorctl restart oneqrelay
+
+Options ([relay]): id, listen, insecure_http, trust_proxy, cert, key, db, secret_file, federation_peers, cafile, init.
+Defaults and explanations are in the file itself. The federation secret is not stored in this file: only its path
+(secret_file).
+
+Start: systemd or supervisord
+-----------------------------
+On installation the service starts by itself, under the detected manager:
+  - systemd, if it is PID 1 (also in containers with systemd): the unit oneqrelay.service;
+  - otherwise supervisord, if installed (apt install supervisor): the program [program:oneqrelay] from
+    /etc/supervisor/conf.d/oneqrelay.conf (copied by postinst), log in /var/log/oneq/relay.log;
+  - otherwise nothing starts; start it with /opt/oneq/relay/bin/run.
+Both use the same script, /opt/oneq/relay/bin/run, and run as the user oneqrelay. The choice can be forced with
+"init = systemd|supervisor|none" in relay.conf.
+
+  sudo systemctl status oneqrelay       |   sudo supervisorctl status oneqrelay
+  sudo journalctl -u oneqrelay -f       |   sudo tail -f /var/log/oneq/relay.log
+
+First steps
+-----------
+1. Community and users. The password is asked for in the terminal; in scripts pass it with the TUNMESH_PASSWORD variable
+   (sudo TUNMESH_PASSWORD=... oneqrelay-admin ...) or with --password-file FILE, which must be readable by the user
+   oneqrelay (the command runs as that user):
+
+     sudo oneqrelay-admin community-add lan 10.50.0.0/24
+     sudo oneqrelay-admin user-add lan alice --role admin
+     sudo oneqrelay-admin list
+
+2. TLS: by default the server listens on 127.0.0.1:8080 in plain HTTP and must be placed behind a reverse proxy with TLS 1.3
+   X25519MLKEM768 only. nginx example (OpenSSL >= 3.5):
+   /usr/share/doc/oneqrelay/examples/nginx-oneqrelay.conf
+
+3. Federation (several oneqrelay servers): on each server
+   - copy the SAME /etc/oneq/relay.secret from the first server (owner oneqrelay:oneqrelay, mode 0600) and set a different
+     "id" in relay.conf (default: the host name);
+   - add to relay.conf: federation_peers = https://other.example.org  (and cafile, if needed);
+   - restart the service.
+   Accounts, nodes and addresses are replicated automatically between servers.
+
+Files
+-----
+  /opt/oneq/relay/                   the application (code, Python libraries, scripts)
+  /etc/oneq/relay.conf               the configuration (conffile, kept on upgrade)
+  /etc/oneq/relay.secret             the federation secret (generated at install, mode 0600)
+  /var/lib/oneq/relay/registry.db    the registry (accounts with scrypt hashes, nodes, addresses)
+  /var/log/oneq/relay.log            log (only under supervisord; under systemd: journalctl)
+
+`apt remove` keeps the configuration and the registry; `apt purge` deletes them, together with the user.
+
+Educational project, without independent cryptographic audit.

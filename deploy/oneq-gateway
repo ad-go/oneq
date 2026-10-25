@@ -1,0 +1,33 @@
+#!/bin/sh
+# oneq gateway (test bench on m): members of the mesh (the community subnet) reach a private network through this node, with NAT.
+# Only that network is forwarded; the mesh gets nothing else out of this node. Idempotent. `oneq-gateway start|stop`.
+# Announce the network to the members: oneqrelay admin route-add oneq 192.168.16.0/24 m   (members need accept_routes)
+MESH=${ONEQ_GATEWAY_MESH:-10.10.0.0/24}
+NET=${ONEQ_GATEWAY_NET:-192.168.16.0/24}
+OUT=${ONEQ_GATEWAY_OUT:-eth0}
+IN=${ONEQ_GATEWAY_IN:-oneq-mesh}
+
+ensure() { t=$1; shift; iptables -t "$t" -C "$@" 2>/dev/null || iptables -t "$t" -A "$@"; }
+drop() { t=$1; shift; while iptables -t "$t" -D "$@" 2>/dev/null; do :; done; }
+
+case "${1:-start}" in
+start)
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    ensure nat POSTROUTING -s "$MESH" -d "$NET" -o "$OUT" -j MASQUERADE
+    ensure filter FORWARD -i "$IN" -o "$OUT" -s "$MESH" -d "$NET" -j ACCEPT
+    ensure filter FORWARD -i "$OUT" -o "$IN" -s "$NET" -d "$MESH" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ensure filter FORWARD -i "$IN" -o "$OUT" -j DROP
+    ensure mangle FORWARD -o "$IN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    ;;
+stop)
+    drop nat POSTROUTING -s "$MESH" -d "$NET" -o "$OUT" -j MASQUERADE
+    drop filter FORWARD -i "$IN" -o "$OUT" -s "$MESH" -d "$NET" -j ACCEPT
+    drop filter FORWARD -i "$OUT" -o "$IN" -s "$NET" -d "$MESH" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    drop filter FORWARD -i "$IN" -o "$OUT" -j DROP
+    drop mangle FORWARD -o "$IN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    ;;
+*)
+    echo "usage: oneq-gateway start|stop" >&2
+    exit 2
+    ;;
+esac
