@@ -124,7 +124,7 @@ def main():
     ff_m = json.load(open(nm("firefox", "firefox")))
     ok("install writes the Chromium manifest with the dev id and the given id", chrome_m["allowed_origins"] == ["chrome-extension://" + "a" * 32 + "/"] and chrome_m["type"] == "stdio"
        and os.path.samefile(chrome_m["path"], client))
-    ok("install writes the Firefox manifest with the add-on id", ff_m["allowed_extensions"] == ["oneq-mesh@1q.ro"])
+    ok("install writes the Firefox manifest with the add-on id", ff_m["allowed_extensions"] == ["k@1q.ro"])
     ok("install skips the browsers that are not there", "edge: not installed" in out and os.path.exists(nm("brave", "brave")))
     subprocess.run([client, "native-host", "uninstall"], capture_output=True, text=True, env=fenv)
     ok("uninstall removes the registrations", not os.path.exists(nm("chrome", "chrome")) and not os.path.exists(nm("firefox", "firefox")))

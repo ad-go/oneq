@@ -14,7 +14,7 @@ The build is reproducible: the same sources give the same zip bytes.
 ## The native host and the store extension id
 The extension needs the oneq client's native messaging host (`oneqclient native-host install`, `NATIVE-HOST.md`). The Chromium host manifest lists the extension ids that may start it. The unpacked and
 install-pack builds carry a development `key` (fixed id `bgmdbjhjoieanbojmbkjpcdmkmofikoo`); a store build has no `key` and gets its own id from the store: after the first upload run
-`oneqclient native-host install --extension-id STOREID` (the packs: `install.ps1 -ExtensionId STOREID`). Firefox is fixed to `oneq-mesh@1q.ro`.
+`oneqclient native-host install --extension-id STOREID` (the packs: `install.ps1 -ExtensionId STOREID`). Firefox is fixed to `k@1q.ro`.
 
 ## What the build does not do
 * **It does not sign or upload.** Each store needs the publisher's own account (Chrome Web Store one-time developer fee, Edge partner account, Mozilla account). Nothing in
@@ -22,7 +22,7 @@ install-pack builds carry a development `key` (fixed id `bgmdbjhjoieanbojmbkjpcd
 * **Firefox signing:** a release Firefox only installs signed add-ons. Upload the zip to AMO; for a self-distributed file choose "On your own" and download the signed `.xpi`
   (or use `web-ext sign` with AMO API keys, kept outside git). Until it is signed, test with `about:debugging` > "Load Temporary Add-on", or Firefox Developer Edition / ESR with
   `xpinstall.signatures.required` set to `false`.
-* **The Firefox add-on id** is `oneq-mesh@1q.ro` (in `build-store.py`). It is fixed forever by the first submission: change it before that if you want another one.
+* **The Firefox add-on id** is `k@1q.ro` (in `build-store.py`). It is fixed forever by the first submission: change it before that if you want another one.
 * **Screenshots** are not produced (see `store/listing.md`).
 * **Privacy policy URL:** the stores want a public URL; host `PRIVACY.md` (for example on the project's pages) and fill in its contact line.
 

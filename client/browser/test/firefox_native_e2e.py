@@ -19,7 +19,7 @@ password = open(pwfile, encoding="utf-8").read().strip()
 ca_pem = open(cafile, encoding="utf-8").read()
 profile = tempfile.mkdtemp(prefix="oneq-ffx-")
 UUID = "7c1d0b52-3e1a-4a53-9f0a-5b6d1f2e8a11"
-GECKO_ID = "oneq-mesh@1q.ro"
+GECKO_ID = "k@1q.ro"
 PORT = 2828
 results = []
 

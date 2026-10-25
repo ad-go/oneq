@@ -96,10 +96,10 @@ build_meta() {
         echo "Upstream-Contact: oneq <k@1q.ro>"
         echo
         echo "Files: *"
-        echo "Copyright: 2026 oneq <k@1q.ro>"
-        echo "License: unspecified"
-        echo " No license has been chosen for this software yet: all rights are reserved by the"
-        echo " copyright holder. Choose and add a license before redistributing the packages."
+        echo "Copyright: 2026 ad-go"
+        echo "License: Apache-2.0"
+        echo " On Debian systems the full text of the Apache License, Version 2.0 is in"
+        echo " /usr/share/common-licenses/Apache-2.0."
     } > "$doc/copyright"
     {
         echo "$name ($VERSION) unstable; urgency=medium"

@@ -3,7 +3,7 @@ name = "oneq-core"
 version = "0.0.1"
 edition = "2021"
 description = "Client core of the oneq post-quantum mesh: protocol, registry client, relay, L3-over-L2 adapter"
-license = "UNLICENSED"
+license = "Apache-2.0"
 
 [lib]
 name = "oneq_core"

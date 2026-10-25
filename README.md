@@ -329,3 +329,8 @@ sudo python3 test_e2e.py         # 2 real TUNs in namespaces: direct, forced rel
   `--require-pop`, a node that gives no proof is accepted and can be taken over.
 - A single peer per node (point-to-point mode); for several peers, use mesh mode.
 - Port prediction guesses (see "Nodes behind NAT"); a NAT with random ports, a CGNAT with public addresses and a symmetric NAT without a constant step stay on the relay.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 2026 ad-go. Third-party components under `client/third_party` and the bundled
+dependencies keep their own licenses. This is an educational project without an independent cryptographic audit; see [SECURITY.md](SECURITY.md).
