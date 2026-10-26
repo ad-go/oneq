@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::svc;
+use crate::{svc, update};
 
 const PAGE: &str = include_str!("ui.html");
 const MAX_BODY: usize = 1024 * 1024;
@@ -25,11 +25,13 @@ pub struct UiConfig {
     pub service_dir: PathBuf,
     /// the program started with administrator rights for `service ...` commands
     pub exe: PathBuf,
+    /// where the update download goes (the user's Downloads folder)
+    pub download_dir: PathBuf,
 }
 
 impl UiConfig {
     pub fn system() -> Result<Self> {
-        Ok(UiConfig { user_dir: svc::user_dir(), service_dir: svc::service_dir(), exe: std::env::current_exe()? })
+        Ok(UiConfig { user_dir: svc::user_dir(), service_dir: svc::service_dir(), exe: std::env::current_exe()?, download_dir: crate::update::downloads_dir() })
     }
     fn settings_file(&self) -> PathBuf {
         self.user_dir.join("ui.json")
@@ -46,7 +48,7 @@ pub fn new_token() -> String {
 }
 
 // ---------------------------------------------------------------------------------------------------- settings
-const EMPTY_SETTINGS: &str = r#"{"relays":[],"community":"","user":"","name":"","ca_pem":"","force_relay":false,"accept_routes":false,"auto_start":false,"start_hidden":false}"#;
+const EMPTY_SETTINGS: &str = r#"{"relays":[],"community":"","user":"","name":"","ca_pem":"","force_relay":false,"accept_routes":false,"update_check":true,"auto_start":false,"start_hidden":false}"#;
 
 fn load_settings(c: &UiConfig) -> Value {
     std::fs::read_to_string(c.settings_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::from_str(EMPTY_SETTINGS).unwrap())
@@ -83,9 +85,16 @@ pub fn validate_settings(v: &Value) -> Result<Value> {
         "ca_pem": ca,
         "force_relay": v["force_relay"] == true,
         "accept_routes": v["accept_routes"] == true,
+        "update_check": v["update_check"] != false,
         "auto_start": v["auto_start"] == true,
         "start_hidden": v["start_hidden"] == true,
     }))
+}
+
+/// `update_check` of the per-user settings file (default yes): also used by the menu-bar helper.
+pub fn update_check_enabled() -> bool {
+    let p = svc::user_dir().join("ui.json");
+    std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map_or(true, |v| v["update_check"] != false)
 }
 
 fn save_settings(c: &UiConfig, s: &Value) -> Result<()> {
@@ -281,6 +290,9 @@ fn connect(c: &UiConfig, body: &Value) -> Result<String> {
     if s["accept_routes"] == true {
         args.push("--accept-routes".into());
     }
+    if s["update_check"] == false {
+        args.push("--no-update-check".into());
+    }
     if s["auto_start"] != true {
         args.push("--no-autostart".into());
     }
@@ -397,6 +409,20 @@ async fn handle(mut s: TcpStream, token: Arc<String>, cfg: Arc<UiConfig>, port: 
             let v = tokio::task::spawn_blocking(move || status_json(&c)).await.unwrap_or(Value::Null);
             json_reply(&mut s, Ok(v)).await
         }
+        ("GET", "api/update") => {
+            // cached; `?force=1` is the manual check (works even when automatic checking is off)
+            let force = req.path.split_once('?').map_or(false, |(_, q)| q.split('&').any(|p| p == "force=1"));
+            let v = if force || update::last().is_some() || load_settings(&cfg)["update_check"] != false {
+                serde_json::to_value(update::check_cached(force).await).unwrap_or(Value::Null)
+            } else {
+                Value::Null // automatic checking is off and nobody asked: nothing known
+            };
+            json_reply(&mut s, Ok(v)).await
+        }
+        ("POST", "api/update/download") => {
+            let v = update::download_latest(&cfg.download_dir).await;
+            json_reply(&mut s, Ok(v)).await
+        }
         ("POST", "api/settings") => {
             let r = validate_settings(&body).and_then(|v| save_settings(&cfg, &v).map(|_| json!({"ok": true})));
             json_reply(&mut s, r).await
@@ -429,6 +455,14 @@ async fn handle(mut s: TcpStream, token: Arc<String>, cfg: Arc<UiConfig>, port: 
 pub async fn serve(listener: TcpListener, token: String, cfg: Arc<UiConfig>) -> Result<()> {
     let port = listener.local_addr().context("local address")?.port();
     let token = Arc::new(token);
+    let bg = tokio::spawn(update::background(update_check_enabled));
+    struct Abort(tokio::task::JoinHandle<()>);
+    impl Drop for Abort {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _bg = Abort(bg);
     loop {
         let (s, _) = listener.accept().await?;
         tokio::spawn(handle(s, token.clone(), cfg.clone(), port));
@@ -454,7 +488,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("oneq-ui-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("svc")).unwrap();
-        Arc::new(UiConfig { user_dir: d.join("user"), service_dir: d.join("svc"), exe: PathBuf::from("oneqclient") })
+        Arc::new(UiConfig { user_dir: d.join("user"), service_dir: d.join("svc"), exe: PathBuf::from("oneqclient"), download_dir: d.join("Downloads") })
     }
 
     fn good() -> Value {
@@ -545,6 +579,50 @@ mod tests {
         let (code, body) = http(port, &h, "POST", &format!("/{token}/api/connect"), &json!({"settings": good()}).to_string()).await;
         assert_eq!(code, 400);
         assert!(body.contains("password"));
+    }
+
+    #[test]
+    fn update_check_setting_defaults_to_on_and_reaches_the_installer() {
+        let v = validate_settings(&good()).unwrap();
+        assert_eq!(v["update_check"], json!(true));
+        let mut g = good();
+        g["update_check"] = json!(false);
+        assert_eq!(validate_settings(&g).unwrap()["update_check"], json!(false));
+        assert_eq!(serde_json::from_str::<Value>(EMPTY_SETTINGS).unwrap()["update_check"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn update_endpoints_check_and_download_with_verification() {
+        use crate::update::testutil::*;
+        let file = b"installer".repeat(500);
+        let upd_port = mock(|p| release_routes(p, &file, &sha(&file))).await;
+        // only this test reads the variable (other update tests pass their options explicitly)
+        std::env::set_var("ONEQ_UPDATE_URL", format!("http://127.0.0.1:{upd_port}/api"));
+        // Windows asset name for the mock; other platforms select theirs (none in the mock) -> test the JSON only
+        let c = cfg("upd");
+        let (port, token) = start(c.clone()).await;
+        let h = format!("127.0.0.1:{port}");
+        assert_eq!(http(port, "evil.example.org", "GET", &format!("/{token}/api/update"), "").await.0, 403);
+        assert_eq!(http(port, &h, "GET", "/wrong/api/update", "").await.0, 404);
+        let (code, body) = http(port, &h, "GET", &format!("/{token}/api/update?force=1"), "").await;
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((code, v["status"].clone(), v["latest"].clone(), v["update_available"].clone()), (200, json!("newer"), json!("9.9.9"), json!(true)));
+        let (_, body) = http(port, &h, "GET", &format!("/{token}/api/update"), "").await; // cached
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["latest"], json!("9.9.9"));
+        let (code, body) = http(port, &h, "POST", &format!("/{token}/api/update/download"), "{}").await;
+        let d: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(code, 200);
+        if crate::update::platform_asset() == Some("oneq-node-windows-x64.msi") {
+            assert_eq!(d["ok"], json!(true), "{d}");
+            assert_eq!(std::fs::read(c.download_dir.join("oneq-node-windows-x64.msi")).unwrap(), file);
+            assert_eq!(d["sha256"], json!(sha(&file)));
+        } else {
+            assert_eq!(d["ok"], json!(false)); // the mock offers only the Windows installer
+            assert!(d["error"].is_string());
+        }
+        // the status page carries the setting
+        let (_, body) = http(port, &h, "GET", &format!("/{token}/api/status"), "").await;
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["settings"]["update_check"], json!(true));
     }
 
     #[test]

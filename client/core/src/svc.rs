@@ -45,6 +45,13 @@ pub struct ServiceConfig {
     pub no_ipv6: bool,
     #[serde(default)]
     pub accept_routes: bool,
+    /// check for new releases (default yes)
+    #[serde(default = "yes")]
+    pub update_check: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_ifname() -> String {
@@ -108,6 +115,7 @@ impl ServiceConfig {
             no_port_mapping: self.no_port_mapping,
             no_ipv6: self.no_ipv6,
             accept_routes: self.accept_routes,
+            no_update_check: !self.update_check,
         })
     }
 }
@@ -127,7 +135,11 @@ pub async fn supervise(cfg: ServiceConfig, status: Arc<Status>, stop: Arc<Notify
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+    let upd = cfg.update_check.then(|| tokio::spawn(crate::update::background(|| true)));
     supervise_inner(cfg, status.clone(), stop).await;
+    if let Some(u) = upd {
+        u.abort();
+    }
     writer.abort();
     status.set_state("stopped", "");
     write_status(&status);
@@ -253,6 +265,7 @@ pub fn write_install_files(c: &Config, ifname: &str, wintun: Option<String>) -> 
         no_port_mapping: c.no_port_mapping,
         no_ipv6: c.no_ipv6,
         accept_routes: c.accept_routes,
+        update_check: !c.no_update_check,
     };
     let path = default_config_path();
     std::fs::write(&path, serde_json::to_string_pretty(&sc)?)?;

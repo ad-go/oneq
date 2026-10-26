@@ -26,12 +26,18 @@ install-pack builds carry a development `key` (fixed id `bgmdbjhjoieanbojmbkjpcd
 * **Screenshots** are not produced (see `store/listing.md`).
 * **Privacy policy URL:** the stores want a public URL; host `PRIVACY.md` (for example on the project's pages) and fill in its contact line.
 
+## Update check: permissions for reviewers
+The `downloads` permission and the host permissions for `https://api.github.com/*`, `https://github.com/*`, `https://objects.githubusercontent.com/*` and `https://release-assets.githubusercontent.com/*`
+serve one feature: a once-a-day, optional (Settings checkbox, default on) look at the project's public GitHub release to tell the user a newer version exists. Only when the user presses `Download` is the
+package fetched; its SHA-256 is verified against the release's `SHA256SUMS` and only then saved with `chrome.downloads` to the user's download folder. The extension never installs, executes or
+auto-updates code from the download, loads no remote code, sends no cookies, identifiers or telemetry, and rejects any redirect to a host outside this list.
+
 ## Differences between the two builds
 |  | Chromium zip | Firefox zip |
 |---|---|---|
 | Background | service worker | event page (`background.scripts`) |
 | Proxy mechanism | PAC script through `chrome.proxy.settings` | `proxy.onRequest` listener |
-| Host permissions | `127.0.0.1`, `localhost` | the same plus `<all_urls>` (required by `proxy.onRequest`) |
+| Host permissions | `127.0.0.1`, `localhost` and the four GitHub hosts of the update check | the same plus `<all_urls>` (required by `proxy.onRequest`) |
 | Manifest extras | `minimum_chrome_version` 110 | `browser_specific_settings.gecko` (id, minimum Firefox 140, no data collection) |
 
 ## Before every release

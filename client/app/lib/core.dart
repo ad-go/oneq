@@ -33,6 +33,32 @@ class Peer {
         session = j['session'] ?? false;
 }
 
+/// Result of an update check (spec: UPDATE-SPEC.md). Network work is done by the Rust core.
+class UpdateInfo {
+  final String current, latest, status, url, notes, assetName;
+  final bool available;
+  final String? error, downloadUrl;
+  UpdateInfo(Map<String, dynamic> j)
+      : current = '${j['current'] ?? ''}',
+        latest = '${j['latest'] ?? ''}',
+        status = '${j['status'] ?? 'unknown'}',
+        url = '${j['url'] ?? ''}',
+        notes = '${j['notes'] ?? ''}',
+        available = j['update_available'] == true,
+        error = j['error'] as String?,
+        assetName = '${(j['asset'] is Map ? j['asset']['name'] : null) ?? ''}',
+        downloadUrl = j['asset'] is Map ? j['asset']['download_url'] as String? : null;
+}
+
+class DownloadResult {
+  final bool ok;
+  final String path, error;
+  DownloadResult(Map<String, dynamic> j)
+      : ok = j['ok'] == true,
+        path = '${j['path'] ?? ''}',
+        error = '${j['error'] ?? 'unknown error'}';
+}
+
 class Snapshot {
   final String state, message, ip, community, relayUrl, natType, natPublic;
   final bool? natInbound;
@@ -40,6 +66,7 @@ class Snapshot {
   final bool relayConnected;
   final List<Peer> peers;
   final List<String> log;
+  final UpdateInfo? update;
   Snapshot(Map<String, dynamic> j)
       : state = j['state'] ?? 'idle',
         message = j['message'] ?? '',
@@ -55,7 +82,8 @@ class Snapshot {
         rxBytes = j['rx_bytes'] ?? 0,
         relayConnected = j['relay_connected'] ?? false,
         peers = [for (final p in (j['peers'] ?? const [])) Peer(p)],
-        log = [for (final l in (j['log'] ?? const [])) l.toString()];
+        log = [for (final l in (j['log'] ?? const [])) l.toString()],
+        update = j['update'] is Map<String, dynamic> ? UpdateInfo(j['update']) : null;
 }
 
 String _takeString(DynamicLibrary lib, Pointer<Utf8> p) {
@@ -104,5 +132,33 @@ class OneqCore {
         final lib = _open();
         final p = lib.lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>('oneq_status_json')();
         return Snapshot(jsonDecode(_takeString(lib, p)) as Map<String, dynamic>);
+      });
+
+  /// Update check; [force] bypasses the core's cache (manual action). Never throws: errors come back in the result.
+  static Future<UpdateInfo> updateCheck({bool force = true}) => Isolate.run(() {
+        try {
+          final lib = _open();
+          final f = lib.lookupFunction<Pointer<Utf8> Function(Int32), Pointer<Utf8> Function(int)>('oneq_update_check_json');
+          return UpdateInfo(jsonDecode(_takeString(lib, f(force ? 1 : 0))) as Map<String, dynamic>);
+        } catch (e) {
+          return UpdateInfo({'status': 'error', 'error': '$e'});
+        }
+      });
+
+  /// Download + SHA-256 verification of the installer for this platform into [dir].
+  static Future<DownloadResult> updateDownload(String dir) => Isolate.run(() {
+        try {
+          final lib = _open();
+          final f = lib.lookupFunction<Pointer<Utf8> Function(Pointer<Utf8>), Pointer<Utf8> Function(Pointer<Utf8>)>(
+              'oneq_update_download_json');
+          final d = dir.toNativeUtf8();
+          try {
+            return DownloadResult(jsonDecode(_takeString(lib, f(d))) as Map<String, dynamic>);
+          } finally {
+            malloc.free(d);
+          }
+        } catch (e) {
+          return DownloadResult({'ok': false, 'error': '$e'});
+        }
       });
 }

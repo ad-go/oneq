@@ -96,4 +96,28 @@ $('save').addEventListener('click', async () => {
     $('msg').textContent = e.message;
   }
 });
+
+// ---- updates
+let lastUpd = null;
+$('updauto').addEventListener('change', e => chrome.storage.local.set({ update_check: e.target.checked }));
+$('updnow').addEventListener('click', async () => {
+  const msg = $('updmsg');
+  msg.textContent = 'Checking...';
+  $('upddl').hidden = true;
+  const r = await OneqUpdate.check({ force: true });
+  lastUpd = r;
+  if (r.status === 'error') msg.textContent = 'Update check failed: ' + r.error;
+  else if (r.update_available) {
+    msg.textContent = 'Version ' + r.latest + ' is available (you have ' + r.current + ').';
+    $('upddl').hidden = !r.asset;
+  } else if (r.status === 'unknown') msg.textContent = 'Could not compare versions.';
+  else msg.textContent = 'You have the latest version (' + r.current + ').';
+});
+$('upddl').addEventListener('click', async () => {
+  const msg = $('updmsg');
+  msg.textContent = 'Downloading and verifying...';
+  const d = await OneqUpdate.downloadVerified(lastUpd);
+  msg.textContent = d.ok ? 'Downloaded and verified: ' + d.path + '. Install it when you are ready.' : 'Download failed: ' + d.error;
+});
+chrome.storage.local.get('update_check').then(o => { $('updauto').checked = o.update_check !== false; });
 load();

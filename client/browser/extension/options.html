@@ -45,7 +45,14 @@
   <p class="muted small">Only addresses of the mesh (read from the running proxy) and names ending in <code>.oneq</code> use the proxy; everything else is not touched. Both addresses must be on this computer (127.x.x.x or localhost).</p>
   <p><button id="save">Save</button> <span id="msg" class="muted"></span></p>
 </section>
+<section id="upd">
+  <h4>Updates</h4>
+  <label class="row"><input type="checkbox" id="updauto"> <span>Check for updates automatically</span></label>
+  <p><button id="updnow" type="button">Check for updates</button> <button id="upddl" type="button" hidden>Download</button> <span id="updmsg" class="muted"></span></p>
+  <p class="muted small">Looks at the latest release on GitHub (api.github.com) about once a day. Nothing is installed: a download is only saved to your download folder after its SHA-256 checksum matched.</p>
+</section>
 <script src="pac.js"></script>
+<script src="update.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

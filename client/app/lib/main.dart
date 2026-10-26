@@ -7,6 +7,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'controller.dart';
 import 'settings_page.dart';
+import 'update_banner.dart';
 
 final controller = OneqController();
 final navigatorKey = GlobalKey<NavigatorState>();
@@ -188,6 +189,7 @@ class _HomePageState extends State<HomePage> {
       ]),
       body: SafeArea(
         child: ListView(padding: const EdgeInsets.all(16), children: [
+          UpdateBanner(c: c),
           if (!c.active) ...[
             if (!configured)
               Card(

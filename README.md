@@ -330,6 +330,16 @@ sudo python3 test_e2e.py         # 2 real TUNs in namespaces: direct, forced rel
 - A single peer per node (point-to-point mode); for several peers, use mesh mode.
 - Port prediction guesses (see "Nodes behind NAT"); a NAT with random ports, a CGNAT with public addresses and a symmetric NAT without a constant step stay on the relay.
 
+## Update check
+
+The relay, the Python node and the clients look once a day on the GitHub Releases of `ad-go/oneq` whether a newer version exists
+(`GET https://api.github.com/repos/ad-go/oneq/releases/latest`, HTTPS only, no identifiers, no telemetry; drafts and pre-releases are ignored).
+When one exists, the relay admin page shows a one-line banner and the node writes one log line. The package can be downloaded from the admin
+page (`oneqnode update-download` on a node) and is verified against the `SHA256SUMS` of the same release; a file that does not match is deleted.
+Nothing is ever installed or executed automatically: you install the downloaded package yourself.
+Turn the automatic check off with `update_check = no` in `relay.conf` / `node.conf` (the "Check for updates" button and
+`oneqnode update-check` keep working). `update_url` overrides the release API address, `update_dir` the download directory of the relay.
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 2026 ad-go. Third-party components under `client/third_party` and the bundled

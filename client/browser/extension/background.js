@@ -1,7 +1,7 @@
 // Service worker (Chrome, Edge, Brave) or event page (Firefox): polls the status page of `oneqclient proxy`, keeps the browser's proxy settings in line
 // (Chromium: a PAC script; Firefox: a proxy.onRequest listener; both send only the mesh through the local SOCKS5 proxy) and the toolbar badge.
 // Nothing leaves this machine: the proxy and its status page are on 127.0.0.1.
-if (typeof importScripts === 'function') importScripts('pac.js');   // Firefox loads pac.js from the manifest's background.scripts
+if (typeof importScripts === 'function') importScripts('pac.js', 'update.js');   // Firefox loads both from the manifest's background.scripts
 
 // Firefox has no PAC through the extension API and no chrome.proxy.settings: it asks proxy.onRequest for every request instead.
 const FIREFOX = typeof browser !== 'undefined' && !!(browser.proxy && browser.proxy.onRequest);
@@ -210,5 +210,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 chrome.alarms.create('poll', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(a => { if (a.name === 'poll') state(); });
+
+// ---- update check: first look 1-2 minutes after start, then every 24 h, only while the option `update_check` (default on) is set. The result is
+// stored for the popup banner; no badge (the badge shows the connection state) and nothing is downloaded here.
+async function updateTick() {
+  const o = await chrome.storage.local.get('update_check');
+  if (o.update_check === false) return;
+  try { await OneqUpdate.check({ force: false }); } catch (e) { /* silent */ }
+}
+chrome.alarms.get('update', a => {
+  if (!a) chrome.alarms.create('update', { delayInMinutes: 1 + Math.random(), periodInMinutes: 1440 });
+});
+chrome.alarms.onAlarm.addListener(a => { if (a.name === 'update') updateTick(); });
 setInterval(state, POLL_MS);   // while the worker is awake (popup open, requests flowing)
 state();

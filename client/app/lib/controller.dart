@@ -22,6 +22,8 @@ class Settings {
   bool startHidden = false;
   /// Android: keep the (encrypted) connection config so the node starts at boot / as always-on VPN
   bool autoStart = false;
+  /// check GitHub for a newer release (default yes)
+  bool updateCheck = true;
 
   List<String> get relayList => relays.split(RegExp(r'[\s,]+')).where((s) => s.isNotEmpty).toList();
 
@@ -35,6 +37,7 @@ class Settings {
         'accept_routes': acceptRoutes,
         'start_hidden': startHidden,
         'auto_start': autoStart,
+        'update_check': updateCheck,
       };
 
   /// Validates an imported map; throws [FormatException] with a message for the user.
@@ -61,6 +64,7 @@ class Settings {
     s.acceptRoutes = j['accept_routes'] == true;
     s.startHidden = j['start_hidden'] == true;
     s.autoStart = j['auto_start'] == true;
+    s.updateCheck = j['update_check'] != false;
     return s;
   }
 }
@@ -95,7 +99,8 @@ class OneqController extends ChangeNotifier {
         ..forceRelay = p.getBool('force') ?? false
         ..acceptRoutes = p.getBool('routes') ?? false
         ..startHidden = p.getBool('hidden') ?? false
-        ..autoStart = p.getBool('autostart') ?? false;
+        ..autoStart = p.getBool('autostart') ?? false
+        ..updateCheck = p.getBool('updatecheck') ?? true;
     } catch (_) {}
     notifyListeners();
   }
@@ -112,6 +117,7 @@ class OneqController extends ChangeNotifier {
       await p.setBool('routes', settings.acceptRoutes);
       await p.setBool('hidden', settings.startHidden);
       await p.setBool('autostart', settings.autoStart);
+      await p.setBool('updatecheck', settings.updateCheck);
     } catch (_) {}
     notifyListeners();
   }
@@ -155,6 +161,7 @@ class OneqController extends ChangeNotifier {
           'key_file': await keyFile(),
           'force_relay': s.forceRelay,
           'accept_routes': s.acceptRoutes,
+          'update_check': s.updateCheck,
         };
         final ok = await vpn.invokeMethod<bool>('start', {'config': jsonEncode(cfg), 'persist': s.autoStart});
         if (ok != true) throw OneqError('The VPN permission was refused.');
@@ -201,6 +208,7 @@ class OneqController extends ChangeNotifier {
         final st = await DesktopService.readStatus();
         if (st != null) {
           snap = st;
+          _takeUpdate(st);
           active = true;
           error = st.state == 'error' ? st.message : null;
         } else if (DateTime.now().difference(_startedAt) > const Duration(seconds: 20)) {
@@ -223,8 +231,75 @@ class OneqController extends ChangeNotifier {
       }
       error = err.isEmpty ? null : err;
       snap = await OneqCore.status();
+      _takeUpdate(snap!);
       notifyListeners();
     } catch (_) {}
+  }
+
+  // ------------------------------------------------------------------ updates (never blocks connect/disconnect)
+  UpdateInfo? updateInfo;
+  bool updateDismissed = false; // this session only
+  bool updateBusy = false;
+  String updateMessage = '';
+
+  /// The banner shows when the last result says a newer release exists and the user has not dismissed it.
+  bool get updateBanner => updateInfo?.available == true && !updateDismissed;
+
+  void _takeUpdate(Snapshot st) {
+    if (st.update != null && !updateBusy) updateInfo = st.update;
+  }
+
+  void dismissUpdate() {
+    updateDismissed = true;
+    notifyListeners();
+  }
+
+  /// Manual check: always works, bypasses the cache.
+  Future<void> checkUpdate() async {
+    if (updateBusy) return;
+    updateBusy = true;
+    updateMessage = 'Checking...';
+    notifyListeners();
+    final r = await OneqCore.updateCheck(force: true);
+    updateInfo = r;
+    updateBusy = false;
+    if (r.available) {
+      updateDismissed = false;
+      updateMessage = 'Version ${r.latest} is available (you have ${r.current}).';
+    } else if (r.status == 'current') {
+      updateMessage = 'You have the latest version (${r.current}).';
+    } else {
+      updateMessage = 'Could not check for updates: ${r.error ?? 'unknown result'}';
+    }
+    notifyListeners();
+  }
+
+  /// tests only
+  String? downloadDirOverride;
+
+  /// Windows: the Downloads folder; Android: the app's external Downloads directory (no permission needed).
+  Future<String> downloadDir() async {
+    if (downloadDirOverride != null) return downloadDirOverride!;
+    if (Platform.isAndroid) return (await vpn.invokeMethod<String>('downloadsDir'))!;
+    final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'] ?? '.';
+    final d = Directory('$home${Platform.pathSeparator}Downloads');
+    await d.create(recursive: true);
+    return d.path;
+  }
+
+  Future<void> downloadUpdate() async {
+    if (updateBusy) return;
+    updateBusy = true;
+    updateMessage = 'Downloading and verifying...';
+    notifyListeners();
+    try {
+      final r = await OneqCore.updateDownload(await downloadDir());
+      updateMessage = r.ok ? 'Downloaded and verified: ${r.path}. Install it when you are ready.' : 'Download failed: ${r.error}';
+    } catch (e) {
+      updateMessage = 'Download failed: $e';
+    }
+    updateBusy = false;
+    notifyListeners();
   }
 
   Future<void> disconnect() async {

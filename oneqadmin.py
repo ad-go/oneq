@@ -18,6 +18,8 @@ It is served by the relay itself, on its TLS port:
   DELETE /admin/api/c/<comm>/nodes/<id>
   POST /admin/api/federation/peers     {url}          DELETE /admin/api/federation/peers?url=
   POST /admin/api/federation/sync      pull from all peers now
+  GET  /admin/api/update[?force=1]     newer release available? (cached 6 h; force = manual check, at most once a minute)
+  POST /admin/api/update/download      download the offered file into update_dir and verify its SHA-256 (nothing is installed)
 
 Changes go through the same replicated registry as everything else, so they reach every oneqrelay of the federation.
 Every change is written to the log with the client address. Educational project, not independently audited.
@@ -96,6 +98,8 @@ class AdminUI:
             web.post(a + "/federation/peers", self.api(self.h_peer_add)),
             web.delete(a + "/federation/peers", self.api(self.h_peer_del)),
             web.post(a + "/federation/sync", self.api(self.h_sync)),
+            web.get(a + "/update", self.api(self.h_update)),
+            web.post(a + "/update/download", self.api(self.h_update_download)),
         ]
 
     # ------------------------------------------------------------ plumbing
@@ -380,6 +384,22 @@ class AdminUI:
     async def h_peer_del(self, request):
         self.relay.remove_peer(request.query.get("url", ""))
         return web.json_response(self.federation())
+
+    # ------------------------------------------------------------ update check
+    async def h_update(self, request):
+        r = self.relay
+        res = dict(await r.updater.aget(force=request.query.get("force") == "1"))
+        res["automatic"] = bool(r.update_check)
+        return web.json_response(res)
+
+    async def h_update_download(self, request):
+        r = self.relay
+        if r.updater.result is None:
+            await r.updater.aget()
+        res = await r.updater.adownload(r.update_dir)
+        if res.get("ok"):
+            log.info("update downloaded and verified: %s (%s bytes)", res["path"], res["size"])
+        return web.json_response(res)
 
     async def h_sync(self, request):
         self.relay.poke.set()

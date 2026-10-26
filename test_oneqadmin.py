@@ -18,6 +18,8 @@ import meshdb
 import oneqadmin
 import oneqnat
 import oneqrelay as sn
+import onequpdate
+from test_onequpdate import BIN_SHA, Mock
 from test_oneqrelay import Fed, SECRET, eventually, free_port, free_udp_port
 
 logging.getLogger("oneqrelay").setLevel(logging.CRITICAL)
@@ -34,7 +36,9 @@ class AdminFed(Fed):
         peers = [u for j, u in enumerate(self.urls) if j != i]
         stun = oneqnat.StunServer("127.0.0.1", free_udp_port(), free_udp_port(), free_udp_port()) if i == 0 else None
         node = sn.OneqRelay(store, SECRET, peers, sync_interval=self.SYNC, admin_password=ADMIN_PW if i == 0 else None,
-                           info={"listen": f"127.0.0.1:{self.ports[i]}", "tls": False, "db": db}, stun=stun)
+                           info={"listen": f"127.0.0.1:{self.ports[i]}", "tls": False, "db": db}, stun=stun,
+                           update_check=getattr(self, "UPD_CHECK", False), update_url=getattr(self, "upd_url", None),
+                           update_dir=getattr(self, "upd_dir", "/nonexistent/updates"))
         node.insecure_fed = True
         runner = web.AppRunner(node.make_app(), access_log=None)
         await runner.setup()
@@ -332,6 +336,65 @@ class TestAdminFederation(AdminFed):
         again = sn.OneqRelay(self.nodes[0].store, SECRET, [self.urls[1]], admin_password=ADMIN_PW)
         self.assertEqual(again.fed_peers, [self.urls[1], url])
         self.assertEqual(again.extra_peers, [url])
+
+
+class TestAdminUpdate(AdminFed):
+    """GET /update and POST /update/download against a local mock of the GitHub release API."""
+    UPD_CHECK = False        # automatic check off: the manual check and the download must still work
+
+    async def asyncSetUp(self):
+        self.mock = Mock()
+        self._orig_sp = onequpdate.server_package_installed
+        onequpdate.server_package_installed = lambda: False      # the test host may have oneq-server installed
+        self.upd_url = self.mock.url
+        self.upd_dir = os.path.join(tempfile.mkdtemp(), "updates")
+        await super().asyncSetUp()
+
+    async def asyncTearDown(self):
+        await super().asyncTearDown()
+        self.mock.close()
+        onequpdate.server_package_installed = self._orig_sp
+
+    async def test_requires_operator_token(self):
+        self.assertEqual((await self.a("GET", "/update"))[0], 401)
+        self.assertEqual((await self.a("POST", "/update/download", {}))[0], 401)
+        self.assertEqual((await self.a("GET", "/update", tok=await self.token(0)))[0], 401)     # a community admin is not the operator
+        self.assertEqual((await self.a("POST", "/update/download", {}, tok="garbage"))[0], 401)
+
+    async def test_check_cached_and_forced_with_automatic_check_off(self):
+        tok = await self.admin_token()
+        st, r = await self.a("GET", "/update", tok=tok)
+        self.assertEqual(st, 200, r)
+        self.assertEqual((r["status"], r["update_available"], r["current"], r["latest"], r["automatic"]), ("newer", True, sn.VERSION, "0.0.2", False))
+        self.assertEqual(r["asset"]["name"], "oneqrelay_0.0.2_amd64.deb")
+        n = len(self.mock.hits)
+        await self.a("GET", "/update", tok=tok)
+        self.assertEqual(len(self.mock.hits), n)                    # cached
+        self.mock.tag = "v0.0.3"
+        st, r = await self.a("GET", "/update?force=1", tok=tok)
+        self.assertEqual(r["latest"], "0.0.3")
+        self.assertEqual(st, 200)
+
+    async def test_no_release_is_reported_not_raised(self):
+        self.mock.api_status = 404
+        st, r = await self.a("GET", "/update", tok=await self.admin_token())
+        self.assertEqual((st, r["status"], r["update_available"]), (200, "error", False))
+
+    async def test_download_verified_into_update_dir(self):
+        tok = await self.admin_token()
+        st, r = await self.a("POST", "/update/download", {}, tok)          # no prior GET: the endpoint checks first
+        self.assertEqual(st, 200, r)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["name"], r["sha256"]), ("oneqrelay_0.0.2_amd64.deb", BIN_SHA))
+        self.assertEqual(os.path.dirname(r["path"]), self.upd_dir)
+        self.assertEqual(os.listdir(self.upd_dir), ["oneqrelay_0.0.2_amd64.deb"])
+
+    async def test_download_with_bad_hash_keeps_nothing(self):
+        self.mock.sums = f"{'1' * 64}  oneqrelay_0.0.2_amd64.deb\n"
+        st, r = await self.a("POST", "/update/download", {}, await self.admin_token())
+        self.assertEqual(st, 200)
+        self.assertFalse(r["ok"])
+        self.assertEqual(os.listdir(self.upd_dir) if os.path.isdir(self.upd_dir) else [], [])
 
 
 if __name__ == "__main__":

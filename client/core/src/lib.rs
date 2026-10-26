@@ -25,6 +25,7 @@ pub mod svc;
 #[cfg(windows)]
 pub mod winsvc;
 pub mod tls;
+pub mod update;
 pub mod ui;
 pub mod wire;
 

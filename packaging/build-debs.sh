@@ -120,6 +120,6 @@ build_meta() {
     echo "built $OUT/${name}_${VERSION}_all.deb ($(du -h "$OUT/${name}_${VERSION}_all.deb" | cut -f1))"
 }
 
-build oneqrelay relay "aiohttp==3.14.5 segno==1.6.1 cryptography==50.0.2" oneqrelay.py oneqadmin.py oneqadmin.html oneqtotp.py oneqinit.py oneqnat.py oneqpop.py meshdb.py rendezvous_server.py pqtls.py oneqconf.py pq_openssl.cnf
-build oneqnode node "aiohttp==3.14.5 cryptography==50.0.2" oneqnode.py oneqnat.py oneqportmap.py oneqpop.py meshproto.py oneqtunel.py pqtls.py oneqconf.py pq_openssl.cnf
+build oneqrelay relay "aiohttp==3.14.5 segno==1.6.1 cryptography==50.0.2" oneqrelay.py oneqadmin.py oneqadmin.html oneqtotp.py oneqinit.py oneqnat.py oneqpop.py meshdb.py rendezvous_server.py pqtls.py oneqconf.py onequpdate.py pq_openssl.cnf
+build oneqnode node "aiohttp==3.14.5 cryptography==50.0.2" oneqnode.py oneqnat.py oneqportmap.py oneqpop.py meshproto.py oneqtunel.py pqtls.py oneqconf.py onequpdate.py pq_openssl.cnf
 build_meta oneq-server

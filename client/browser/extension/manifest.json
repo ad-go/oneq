@@ -25,11 +25,16 @@
     "proxy",
     "storage",
     "alarms",
-    "nativeMessaging"
+    "nativeMessaging",
+    "downloads"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://api.github.com/*",
+    "https://github.com/*",
+    "https://objects.githubusercontent.com/*",
+    "https://release-assets.githubusercontent.com/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"

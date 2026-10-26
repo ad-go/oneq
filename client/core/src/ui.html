@@ -29,11 +29,23 @@
   pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; max-height:220px; overflow:auto; font-size:12px; white-space:pre-wrap; }
   #note { margin-top:10px; min-height:1.2em; } .err { color:var(--err); } .ok { color:var(--ok); }
   .muted { color:var(--muted); font-size:13px; }
+  #update-banner { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:6px 12px; margin-bottom:12px; border:1px solid var(--line); border-radius:8px; background:var(--card); font-size:13px; }
+  #update-banner[hidden] { display:none; }
+  #update-banner button, #update-banner a { padding:3px 10px; font-size:13px; }
+  #update-banner a { border:1px solid var(--line); border-radius:6px; color:var(--fg); text-decoration:none; }
+  #upd-text { flex:1; min-width:12em; }
 </style>
 </head>
 <body>
 <main>
   <header><h1>oneq</h1><div id="badge"><span class="dot"></span><span id="state">…</span></div></header>
+
+  <div id="update-banner" hidden>
+    <span id="upd-text"></span>
+    <button id="upd-download" class="primary">Download</button>
+    <a id="upd-notes" href="#" target="_blank" rel="noopener">Release notes</a>
+    <button id="upd-dismiss" title="Hide for this session" aria-label="Hide">&times;</button>
+  </div>
 
   <section id="status">
     <h2>Status</h2>
@@ -68,6 +80,13 @@
   </section>
 
   <section>
+    <h2>Updates</h2>
+    <div class="check"><input type="checkbox" id="upd-auto"><label for="upd-auto" style="margin:0;color:var(--fg);font-size:14px">Check for updates automatically</label></div>
+    <p class="muted">Looks at GitHub for a newer release (no personal data is sent). Downloads are verified with SHA-256 and never installed automatically.</p>
+    <div class="row"><button id="upd-check">Check for updates</button><span id="upd-status" class="muted" style="align-self:center"></span></div>
+  </section>
+
+  <section>
     <h2>Export and import</h2>
     <p class="muted">The exported file is the same format the oneq apps use. Secrets are left out unless you tick them.</p>
     <div class="check"><input type="checkbox" id="x-pw"><label for="x-pw" style="margin:0;color:var(--fg);font-size:14px">Include the password (plain text)</label></div>
@@ -93,12 +112,12 @@ async function api(path, body) {
 }
 function settings() {
   return { relays: $('relays').value.split(/[\s,]+/).filter(Boolean), community: $('community').value.trim(), user: $('user').value.trim(),
-           name: $('name').value.trim(), ca_pem: $('ca').value, force_relay: $('force').checked, accept_routes: $('routes').checked,
+           name: $('name').value.trim(), ca_pem: $('ca').value, force_relay: $('force').checked, accept_routes: $('routes').checked, update_check: $('upd-auto').checked,
            auto_start: $('auto').checked, start_hidden: !!(last && last.settings && last.settings.start_hidden) };
 }
 function fill(s) {
   $('relays').value = (s.relays || []).join('\n'); $('community').value = s.community || ''; $('user').value = s.user || '';
-  $('name').value = s.name || ''; $('ca').value = s.ca_pem || ''; $('force').checked = !!s.force_relay; $('routes').checked = !!s.accept_routes; $('auto').checked = !!s.auto_start;
+  $('name').value = s.name || ''; $('ca').value = s.ca_pem || ''; $('force').checked = !!s.force_relay; $('routes').checked = !!s.accept_routes; $('upd-auto').checked = s.update_check !== false; $('auto').checked = !!s.auto_start;
 }
 function fmt(b) { const u = ['B','KB','MB','GB']; let i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return b.toFixed(i ? 1 : 0) + ' ' + u[i]; }
 let filled = false, last = null;
@@ -148,7 +167,33 @@ async function importText(t) { const r = await api('import', { text: t }); fill(
 $('import-file').onclick = () => $('file').click();
 $('file').onchange = e => { const f = e.target.files[0]; if (!f) return; if (f.size > 1048576) return note('The file is too large to be a settings file.', true); f.text().then(t => busy($('import-file'), () => importText(t))); e.target.value = ''; };
 $('paste').onclick = () => busy($('paste'), async () => importText(await navigator.clipboard.readText()));
+let upd = null, updHidden = false;
+function showUpdate(manual) {
+  const b = $('update-banner');
+  if (upd && upd.update_available && !updHidden) {
+    $('upd-text').textContent = `Version ${upd.latest} is available (you have ${upd.current}).`;
+    $('upd-download').hidden = !upd.asset; $('upd-download').disabled = false;
+    const n = $('upd-notes'); if (/^https:\/\//.test(upd.url || '')) { n.href = upd.url; n.hidden = false; } else n.hidden = true;
+    b.hidden = false;
+  } else b.hidden = true;
+  if (manual) {
+    $('upd-status').textContent = !upd ? '' : upd.status === 'error' ? 'Check failed: ' + (upd.error || 'unknown error') : upd.update_available ? `Version ${upd.latest} is available.` : upd.status === 'current' ? `You have the latest version (${upd.current}).` : 'Cannot compare the versions.';
+  }
+}
+async function checkUpdate(manual) {
+  try { upd = await api('update' + (manual ? '?force=1' : '')); updHidden = updHidden && !manual ? true : false; } catch (e) { upd = null; if (manual) $('upd-status').textContent = 'Check failed: ' + e.message; return; }
+  showUpdate(manual);
+}
+$('upd-check').onclick = async () => { $('upd-check').disabled = true; $('upd-status').textContent = 'Checking…'; await checkUpdate(true); $('upd-check').disabled = false; };
+$('upd-dismiss').onclick = () => { updHidden = true; showUpdate(false); };
+$('upd-download').onclick = async () => {
+  $('upd-download').disabled = true; note('Downloading and verifying…');
+  try { const r = await api('update/download', {}); r.ok ? note('Downloaded and verified: ' + r.path + '. Install it when you are ready.') : note('Download failed: ' + r.error, true); }
+  catch (e) { note('Download failed: ' + e.message, true); }
+  $('upd-download').disabled = false;
+};
 refresh(); setInterval(refresh, 2000);
+checkUpdate(false); setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 </script>
 </body>
 </html>

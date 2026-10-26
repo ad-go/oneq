@@ -48,6 +48,8 @@ pub struct Snapshot {
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub log: Vec<String>,
+    /// result of the update check (filled from `crate::update` when the snapshot is taken); `null` until a check ran
+    pub update: Option<crate::update::UpdateResult>,
 }
 
 #[derive(Default)]
@@ -65,7 +67,9 @@ impl Status {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        self.inner.lock().unwrap().clone()
+        let mut s = self.inner.lock().unwrap().clone();
+        s.update = crate::update::last();
+        s
     }
 
     pub fn update(&self, f: impl FnOnce(&mut Snapshot)) {

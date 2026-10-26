@@ -16,6 +16,7 @@ usage:
   oneqclient native-host install|uninstall                                   the extension's connection manager (see: oneqclient native-host help)
   oneqclient ui [--port N] [--no-open]                                       local web interface (settings, status, export/import)
   oneqclient menubar [--open]                                                (macOS) status icon in the menu bar; --open also opens the settings page
+  oneqclient update check [--json] | download [--dir DIR] [--json]          look for a newer release / download and SHA-256-verify its installer
   oneqclient genkey [--key-file FILE]          create the node key and print the node id
   oneqclient help
 
@@ -33,6 +34,7 @@ options for `up`:
   --no-port-mapping     do not ask the router (PCP, NAT-PMP, UPnP) to forward our UDP port
   --no-ipv6             IPv4 only (no dual-stack socket, no IPv6 candidates)
   --accept-routes       use the private networks the administrator routed through a gateway member (routes are installed on the TUN interface; off by default)
+  --no-update-check     do not check GitHub for a newer release (default: check at start and every 24 h; nothing is installed automatically)
   --force-relay         send everything through the relay
   --no-relay            direct UDP only
   --no-autostart        (service install) do not start at boot; start it with `service start`
@@ -99,6 +101,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args> {
             "--no-port-mapping" => cfg.no_port_mapping = true,
             "--no-ipv6" => cfg.no_ipv6 = true,
             "--accept-routes" => cfg.accept_routes = true,
+            "--no-update-check" => cfg.no_update_check = true,
             "--relay-after" => cfg.relay_after_s = val("--relay-after")?.parse()?,
             "--ifname" => ifname = val("--ifname")?,
             "--wintun" => wintun = Some(val("--wintun")?),
@@ -161,6 +164,9 @@ async fn main() -> Result<()> {
                 .with_env_filter(if a.verbose { "oneq_core=debug,oneqclient=debug" } else { "oneq_core=info,oneqclient=info" })
                 .init();
             let status = Arc::new(Status::new());
+            if !a.cfg.no_update_check {
+                tokio::spawn(oneq_core::update::background(|| true));
+            }
             let prepared = oneq_core::prepare(a.cfg.clone(), &status).await?;
             let wintun = a.wintun.clone().or_else(|| {
                 std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("wintun.dll").to_string_lossy().into_owned()))
@@ -213,6 +219,7 @@ async fn main() -> Result<()> {
             let gate = if a.allow_any { oneq_core::peer::Gate::any() } else { oneq_core::peer::Gate::browsers(&a.allow) };
             oneq_core::proxy::run(a.cfg, oneq_core::proxy::ProxyOpts { socks, status: status_addr, gate }, status, stop).await
         }
+        "update" => update_cmd(args).await,
         "ui" => ui_cmd(args).await,
         "native-host" => native_host_cmd(args),
         "menubar" => {
@@ -465,6 +472,59 @@ fn relay_cmd(args: impl Iterator<Item = String>) -> Result<()> {
             print!("{RELAY_HELP}");
             Ok(())
         }
+    }
+}
+
+async fn update_cmd(mut args: impl Iterator<Item = String>) -> Result<()> {
+    use oneq_core::update;
+    let sub = args.next().unwrap_or_default();
+    let (mut json, mut dir) = (false, None::<String>);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--dir" if sub == "download" => dir = Some(args.next().context("--dir needs a value")?),
+            other => bail!("unknown option {other}"),
+        }
+    }
+    match sub.as_str() {
+        "check" => {
+            let r = update::check_cached(true).await;
+            if json {
+                println!("{}", serde_json::to_string(&r)?);
+            } else {
+                match r.status.as_str() {
+                    "newer" => {
+                        println!("Version {} is available (you have {}).
+Release notes: {}", r.latest, r.current, r.url);
+                        match &r.asset {
+                            Some(a) => println!("Installer for this system: {} ({} bytes). Download it with `oneqclient update download`.", a.name, a.size),
+                            None => println!("This system has no installer in the release: see the release notes."),
+                        }
+                    }
+                    "current" => println!("You have the latest version ({}).", r.current),
+                    "error" => bail!("update check failed: {}", r.error.unwrap_or_default()),
+                    _ => println!("Cannot compare the versions (you have {}, the release is {:?}).", r.current, r.latest),
+                }
+            }
+            Ok(())
+        }
+        "download" => {
+            let dir = dir.map(std::path::PathBuf::from).unwrap_or_else(update::downloads_dir);
+            update::check_cached(true).await;
+            let v = update::download_latest(&dir).await;
+            if json {
+                println!("{v}");
+            } else if v["ok"] == true {
+                println!("Downloaded and verified: {} ({} bytes, sha256 {}). Install it when you are ready.", v["path"].as_str().unwrap_or(""), v["size"], v["sha256"].as_str().unwrap_or(""));
+            } else {
+                bail!("download failed: {}", v["error"].as_str().unwrap_or("unknown error"));
+            }
+            if v["ok"] != true {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        _ => bail!("usage: oneqclient update check [--json] | update download [--dir DIR] [--json]"),
     }
 }
 

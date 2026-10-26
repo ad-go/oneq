@@ -40,6 +40,7 @@ import oneqnat
 import oneqpop
 import oneqportmap
 import oneqtunel as v1
+import onequpdate
 from oneqtunel import HandshakeError, Identity, Reassembler, fragment, node_id, parse_hostport
 
 log = logging.getLogger("oneqnode")
@@ -111,6 +112,9 @@ def mac_bytes(mac: str) -> bytes:
     return bytes(int(x, 16) for x in mac.split(":"))
 
 
+VERSION = "0.0.1"
+
+
 @dataclasses.dataclass
 class NodeConfig:
     relays: list = dataclasses.field(default_factory=list)
@@ -140,6 +144,8 @@ class NodeConfig:
     nat_keepalive: float = 25.0         # mapped-address check interval (also keeps the NAT mapping alive)
     port_mapping: bool = True           # ask the router (PCP, NAT-PMP, UPnP) to forward our UDP port
     ipv6: bool = True                   # dual-stack data socket: publish and try IPv6 addresses
+    update_check: bool = True           # look daily for a newer release (log line only; nothing is downloaded or installed)
+    update_url: Optional[str] = None    # release API URL (default: GitHub releases of ad-go/oneq)
 
 
 def _ssl_for(url: str, ctx):
@@ -1393,6 +1399,8 @@ class OneqNode:
         if cfg.nat_discovery:
             self.tasks.append(asyncio.ensure_future(self._nat_loop()))
             self.tasks.append(asyncio.ensure_future(self._punch_loop()))
+        if cfg.update_check:
+            self.tasks.append(asyncio.ensure_future(onequpdate.Checker(VERSION, "node", cfg.update_url or None).loop(log)))
         self.tasks += [asyncio.ensure_future(self._registry_loop()), asyncio.ensure_future(self._maint())]
         try:
             await asyncio.gather(*self.tasks)
@@ -1432,7 +1440,7 @@ def read_password(args) -> str:
 
 NODE_KEYS = {"relays", "community", "user", "label", "key_file", "password_file", "ifname", "listen", "advertise",
              "stun", "cafile", "via", "force_relay", "no_relay", "relay_after", "configure_interface", "init", "nat_discovery", "relay_offer", "use_delegates",
-             "port_mapping", "ipv6"}
+             "port_mapping", "ipv6", "update_check", "update_url"}
 NODE_SPEC = {"relay": ("relays", oneqconf.to_list), "community": ("community", oneqconf.to_str),
              "user": ("user", oneqconf.to_str), "name": ("label", oneqconf.to_str), "key": ("key_file", oneqconf.to_str),
              "password_file": ("password_file", oneqconf.to_str), "ifname": ("ifname", oneqconf.to_str),
@@ -1445,6 +1453,8 @@ NODE_SPEC = {"relay": ("relays", oneqconf.to_list), "community": ("community", o
              "no_nat_discovery": ("nat_discovery", lambda v, k: not oneqconf.to_bool(v, k)),
              "no_port_mapping": ("port_mapping", lambda v, k: not oneqconf.to_bool(v, k)),
              "no_ipv6": ("ipv6", lambda v, k: not oneqconf.to_bool(v, k)),
+             "no_update_check": ("update_check", lambda v, k: not oneqconf.to_bool(v, k)),
+             "update_url": ("update_url", oneqconf.to_str),
              "no_config": ("configure_interface", lambda v, k: not oneqconf.to_bool(v, k))}
 
 
@@ -1521,6 +1531,29 @@ async def nat_check(host: str, port: int, alt_port: int, local_port: int, as_jso
     return 0 if info.type != "blocked" else 2
 
 
+def update_command(a) -> int:
+    """`update-check` prints the result as JSON; `update-download` downloads and verifies. Exit 0 whatever the network says."""
+    import json
+    url = a.url
+    if not url and a.config:
+        try:
+            url = oneqconf.load(a.config, ["defaults"], NODE_KEYS).get("update_url") or None
+        except oneqconf.ConfigError as e:
+            print(f"oneqnode: {e}", file=sys.stderr)
+    onequpdate.set_user_agent_version(VERSION)
+    res = onequpdate.check(VERSION, "node", url)
+    if a.cmd == "update-check":
+        print(json.dumps(res, indent=2))
+        return 0
+    d = a.dir or ("/var/cache/oneq/updates" if hasattr(os, "geteuid") and os.geteuid() == 0 else os.path.expanduser("~/.cache/oneq/updates"))
+    if not res.get("update_available"):
+        out = {"ok": False, "error": "no newer version" if res.get("status") != "error" else res.get("error")}
+    else:
+        out = onequpdate.download(res, d, url)
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="oneqnode")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1532,6 +1565,12 @@ def main(argv=None):
     nc.add_argument("--change-port", type=int, help="third STUN port of the relay (default: ALT-PORT+1)")
     nc.add_argument("--local-port", type=int, default=0, help="UDP source port to use (default: any)")
     nc.add_argument("--json", action="store_true")
+    uc = sub.add_parser("update-check", help="is a newer oneqnode release available? (prints the result)")
+    ud = sub.add_parser("update-download", help="download the newer oneqnode package and verify its SHA-256 (nothing is installed)")
+    for x in (uc, ud):
+        x.add_argument("--url", help="release API URL (default: GitHub releases of ad-go/oneq)")
+        x.add_argument("--config", metavar="FILE", help="read update_url from this configuration file")
+    ud.add_argument("--dir", help="where to keep the file (default /var/cache/oneq/updates as root, else ~/.cache/oneq/updates)")
     cs = sub.add_parser("config-set", help="write/replace the [NAME] section of a node configuration file")
     cs.add_argument("--file", required=True)
     cs.add_argument("name")
@@ -1556,6 +1595,8 @@ def main(argv=None):
     r.add_argument("--stun", metavar="HOST:PORT", help="extra public STUN server (the service of the relay is used automatically)")
     r.add_argument("--no-nat-discovery", action="store_true", help="do not measure/publish the NAT type with the STUN service of the relay")
     r.add_argument("--no-port-mapping", action="store_true", default=None, help="do not ask the router (PCP, NAT-PMP, UPnP) to forward our UDP port")
+    r.add_argument("--no-update-check", action="store_true", default=None, help="do not look for a newer release automatically (update_check = no)")
+    r.add_argument("--update-url", help="release API URL (default: GitHub releases of ad-go/oneq)")
     r.add_argument("--no-ipv6", action="store_true", default=None, help="IPv4 only (no dual-stack socket, no IPv6 candidates)")
     r.add_argument("--cafile")
     r.add_argument("--force-relay", action="store_true")
@@ -1569,6 +1610,8 @@ def main(argv=None):
     if a.cmd == "nat-check":
         h, port = parse_hostport(a.server)
         return asyncio.run(nat_check(h, port, a.alt_port or port + 1, a.local_port, a.json, a.change_port))
+    if a.cmd in ("update-check", "update-download"):
+        return update_command(a)
     if a.cmd == "genkey":
         ident = Identity.generate()
         v1.save_identity(a.key, ident, a.key + ".pub")
@@ -1594,7 +1637,8 @@ def main(argv=None):
                      ifname=a.ifname, listen=parse_hostport(a.listen), via=a.via, advertise=a.advertise, stun=a.stun,
                      cafile=a.cafile, force_relay=a.force_relay, no_relay=a.no_relay, relay_after=a.relay_after, relay_offer=bool(a.relay_offer), use_delegates=not a.no_delegates,
                      no_config=a.no_config, nat_discovery=not a.no_nat_discovery,
-                     port_mapping=not a.no_port_mapping, ipv6=not a.no_ipv6)
+                     port_mapping=not a.no_port_mapping, ipv6=not a.no_ipv6,
+                     update_check=not a.no_update_check, update_url=a.update_url)
     node = OneqNode(v1.load_identity(a.key), cfg, Tap(cfg.ifname))
     try:
         asyncio.run(node.run())

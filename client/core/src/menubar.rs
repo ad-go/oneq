@@ -37,6 +37,7 @@ unsafe impl Sync for Rt {}
 
 struct Ui {
     status_line: Id,
+    update_item: Id,
     item: Id,
     icons: [Id; 3],
 }
@@ -48,6 +49,8 @@ static UI: OnceLock<Ui> = OnceLock::new();
 static STATE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 connecting, 2 connected
 static SHOWN: AtomicU8 = AtomicU8::new(255);
 static TEXT: Mutex<String> = Mutex::new(String::new());
+/// (latest version, release URL) when a newer release is known
+static UPDATE: Mutex<Option<(String, String)>> = Mutex::new(None);
 static UI_CHILD: Mutex<Option<(Child, Option<String>)>> = Mutex::new(None);
 
 const ICONS: [&[u8]; 3] = [
@@ -150,6 +153,13 @@ extern "C" fn refresh(_this: Id, _cmd: Sel, _arg: Id) {
         let s = nsstring(&text);
         send!(ui.status_line, "setTitle:" => (), Id: s);
         send!(button, "setToolTip:" => (), Id: s);
+        match UPDATE.lock().ok().and_then(|u| u.clone()) {
+            Some((latest, _)) => {
+                send!(ui.update_item, "setTitle:" => (), Id: nsstring(&format!("Update available: {latest}…")));
+                send!(ui.update_item, "setHidden:" => (), bool: false);
+            }
+            None => send!(ui.update_item, "setHidden:" => (), bool: true),
+        }
     }
 }
 
@@ -191,6 +201,29 @@ extern "C" fn on_open(_this: Id, _cmd: Sel, _sender: Id) {
     open_ui();
 }
 
+/// "Update available: x…": opens the release page in the browser (nothing is downloaded or installed here).
+extern "C" fn on_update(_this: Id, _cmd: Sel, _sender: Id) {
+    if let Some((_, url)) = UPDATE.lock().ok().and_then(|u| u.clone()) {
+        if url.starts_with("https://") {
+            open_url(&url);
+        }
+    }
+}
+
+/// "Check for updates": a forced check in a thread; the menu item appears on the next status refresh.
+extern "C" fn on_check(_this: Id, _cmd: Sel, _sender: Id) {
+    std::thread::spawn(|| {
+        let r = crate::update::check_blocking(true);
+        set_update(&r);
+    });
+}
+
+fn set_update(r: &crate::update::UpdateResult) {
+    if let Ok(mut u) = UPDATE.lock() {
+        *u = if r.update_available { Some((r.latest.clone(), r.url.clone())) } else { None };
+    }
+}
+
 extern "C" fn on_quit(_this: Id, _cmd: Sel, _sender: Id) {
     if let Some((c, _)) = UI_CHILD.lock().unwrap().as_mut() {
         let _ = c.kill();
@@ -224,6 +257,8 @@ pub fn run(open_on_start: bool) -> Result<()> {
         }
         let imp = |f: extern "C" fn(Id, Sel, Id)| f as usize as *mut c_void;
         (r.add_method)(cls, sel("openUI:"), imp(on_open), c"v@:@".as_ptr());
+        (r.add_method)(cls, sel("updateAvailable:"), imp(on_update), c"v@:@".as_ptr());
+        (r.add_method)(cls, sel("checkUpdate:"), imp(on_check), c"v@:@".as_ptr());
         (r.add_method)(cls, sel("quitApp:"), imp(on_quit), c"v@:@".as_ptr());
         (r.add_method)(cls, sel("refresh:"), imp(refresh), c"v@:@".as_ptr());
         (r.register)(cls);
@@ -253,16 +288,38 @@ pub fn run(open_on_start: bool) -> Result<()> {
         let status_line = mk("oneq: …", None, "");
         send!(menu, "addItem:" => (), Id: status_line);
         send!(menu, "addItem:" => (), Id: send!(class("NSMenuItem"), "separatorItem" => Id));
+        let update_item = mk("Update available", Some("updateAvailable:"), "");
+        send!(update_item, "setHidden:" => (), bool: true);
+        send!(menu, "addItem:" => (), Id: update_item);
         send!(menu, "addItem:" => (), Id: mk("Open oneq…", Some("openUI:"), "o"));
+        send!(menu, "addItem:" => (), Id: mk("Check for updates", Some("checkUpdate:"), ""));
         send!(menu, "addItem:" => (), Id: mk("Quit menu bar icon", Some("quitApp:"), "q"));
         send!(item, "setMenu:" => (), Id: menu);
-        let _ = UI.set(Ui { status_line, item, icons });
+        let _ = UI.set(Ui { status_line, update_item, item, icons });
+
+        // automatic update check (while enabled in the settings of this user); the service's own result is read with the status
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(crate::update::background(crate::ui::update_check_enabled));
+        }
 
         // status polling: every 3 s in a thread, applied on the main thread
         let d = delegate as usize;
         std::thread::spawn(move || loop {
             let (st, text) = read_status();
             STATE.store(st, Ordering::SeqCst);
+            // newest knowledge wins: this process's own check, else the one the service published in status.json
+            match crate::update::last() {
+                Some(r) => set_update(&r),
+                None => {
+                    let from_service = std::fs::read(crate::svc::service_dir().join("status.json")).ok().and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok()).and_then(|v| {
+                        let u = &v["snapshot"]["update"];
+                        (u["update_available"] == true).then(|| (u["latest"].as_str().unwrap_or("").to_string(), u["url"].as_str().unwrap_or("").to_string()))
+                    });
+                    if let Ok(mut u) = UPDATE.lock() {
+                        *u = from_service;
+                    }
+                }
+            }
             if let Ok(mut t) = TEXT.lock() {
                 *t = text;
             }

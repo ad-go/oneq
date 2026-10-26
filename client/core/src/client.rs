@@ -47,6 +47,8 @@ pub struct Config {
     pub no_ipv6: bool,
     /// use the networks the administrator routed through a gateway member (only private networks outside the mesh; installed in the operating system)
     pub accept_routes: bool,
+    /// do not check GitHub for new releases (the check is on by default; it only informs, nothing is installed)
+    pub no_update_check: bool,
 }
 
 pub struct Prepared {

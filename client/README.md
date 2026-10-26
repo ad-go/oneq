@@ -74,6 +74,22 @@ Unit tests: `nat.rs` (prediction, second NAT, rules), `portmap.rs` (PCP / NAT-PM
 `client.rs` (dual-stack socket, effective NAT); `test_nat_sim.py` runs the Rust client against the Python node behind simulated NATs.
 On Android the default gateway may not be readable: PCP and NAT-PMP are then skipped and UPnP is tried.
 
+## Update check
+
+The client looks at GitHub (`api.github.com/repos/ad-go/oneq/releases/latest`) for a newer release, 30-120 s after start and every 24 h, and
+shows it: the `update` field of the status snapshot (`null` until checked), a banner in `oneqclient ui`, an `Update available: <version>...`
+item in the macOS menu bar, and the Flutter app. Nothing is installed or run automatically; `Download` saves the installer of this platform
+(Windows msi, macOS tar.gz, Android apk; none on Linux) to the Downloads folder, verified against the release's `SHA256SUMS`
+(a mismatch deletes the file). Only HTTPS to GitHub hosts is contacted (<= 5 redirects, 1 MB / 64 KB / 200 MB caps), with a plain
+`User-Agent: oneq/<version>` and no identifiers.
+
+* CLI: `oneqclient update check [--json]`, `oneqclient update download [--dir DIR] [--json]` (a manual check works even when automatic checks are off).
+* Disable the automatic check: `--no-update-check` (`up`, `service install`), `"update_check": false` in `client.json`, the setting `update_check` in the
+  FFI prepare JSON, or the checkbox *Check for updates automatically* in `oneqclient ui`.
+* FFI (`oneq_core`): `oneq_update_check_json(force)` and `oneq_update_download_json(dir)` (blocking, free the result with `oneq_free_string`);
+  JNI: `NativeCore.updateCheck(force)` / `NativeCore.updateDownload(dir)`.
+* Tests use `ONEQ_UPDATE_URL=http://127.0.0.1:PORT/...` (the only way plain http is accepted).
+
 ## Packages: node only, or node and relay (server)
 
 Every platform has two packages, so a machine that only joins a mesh does not carry the relay:
