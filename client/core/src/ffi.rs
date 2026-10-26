@@ -41,6 +41,13 @@ struct FfiConfig {
     no_ipv6: bool,
     #[serde(default)]
     accept_routes: bool,
+    /// check GitHub for new releases (default true)
+    #[serde(default = "yes")]
+    update_check: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 struct Session {
@@ -112,10 +119,15 @@ pub extern "C" fn oneq_prepare(config_json: *const c_char) -> c_int {
         no_port_mapping: c.no_port_mapping,
         no_ipv6: c.no_ipv6,
         accept_routes: c.accept_routes,
+        no_update_check: !c.update_check,
     };
+    let update_check = c.update_check;
     let status = Arc::new(Status::new());
     match rt.block_on(crate::prepare(cfg, &status)) {
         Ok(p) => {
+            if update_check {
+                rt.spawn(crate::update::background(|| true));
+            }
             *guard = Some(Session { rt, status, prepared: Some(p), stop: Arc::new(Notify::new()), running: false });
             0
         }
@@ -183,6 +195,26 @@ pub extern "C" fn oneq_status_json() -> *mut c_char {
     })
 }
 
+/// Update check (blocking; call it from a background isolate/thread). Returns the JSON result object
+/// `{"current","latest","update_available","status","url","notes","asset","checked_at","error"}`; the cached result is returned unless
+/// `force != 0` (then at most one request per 60 s). Free the string with `oneq_free_string`.
+#[no_mangle]
+pub extern "C" fn oneq_update_check_json(force: c_int) -> *mut c_char {
+    let s = std::panic::catch_unwind(|| serde_json::to_string(&crate::update::check_blocking(force != 0)).unwrap_or_default())
+        .unwrap_or_else(|_| r#"{"status":"error","update_available":false,"error":"internal error"}"#.into());
+    to_c(s)
+}
+
+/// Downloads the installer of the latest update check into `dir` and verifies its SHA-256 (blocking). Returns
+/// `{"ok":true,"path","name","size","sha256"}` or `{"ok":false,"error"}`. Nothing is installed or run. Free with `oneq_free_string`.
+#[no_mangle]
+pub extern "C" fn oneq_update_download_json(dir: *const c_char) -> *mut c_char {
+    let Some(d) = cstr(dir).filter(|d| !d.trim().is_empty()) else { return to_c(r#"{"ok":false,"error":"no download directory"}"#.into()) };
+    let s = std::panic::catch_unwind(|| crate::update::download_blocking(std::path::Path::new(&d)).to_string())
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"internal error"}"#.into());
+    to_c(s)
+}
+
 /// Text of the last failure of `oneq_prepare`/`oneq_run`.
 #[no_mangle]
 pub extern "C" fn oneq_last_error() -> *mut c_char {
@@ -231,6 +263,22 @@ mod jni_api {
     #[no_mangle]
     pub extern "system" fn Java_ro_u1q_oneq_oneq_1app_NativeCore_status(env: JNIEnv, _c: JClass) -> jstring {
         let s = take(oneq_status_json());
+        env.new_string(s).map(|j| j.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_ro_u1q_oneq_oneq_1app_NativeCore_updateCheck(env: JNIEnv, _c: JClass, force: jint) -> jstring {
+        let s = take(oneq_update_check_json(force));
+        env.new_string(s).map(|j| j.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_ro_u1q_oneq_oneq_1app_NativeCore_updateDownload(mut env: JNIEnv, _c: JClass, dir: JString) -> jstring {
+        let d = env.get_string(&dir).map(String::from).unwrap_or_default();
+        let s = match CString::new(d) {
+            Ok(c) => take(oneq_update_download_json(c.as_ptr())),
+            Err(_) => r#"{"ok":false,"error":"bad directory"}"#.to_string(),
+        };
         env.new_string(s).map(|j| j.into_raw()).unwrap_or(std::ptr::null_mut())
     }
 

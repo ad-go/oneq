@@ -221,6 +221,21 @@ class _SettingsPageState extends State<SettingsPage> {
             value: c.settings.autoStart,
             onChanged: _locked ? null : (v) => setState(() => c.settings.autoStart = v),
           ),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Check for updates automatically'),
+            value: c.settings.updateCheck,
+            onChanged: _locked ? null : (v) => setState(() => c.settings.updateCheck = v ?? true),
+          ),
+          ListenableBuilder(
+            listenable: c,
+            builder: (_, _) => Wrap(spacing: 12, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              OutlinedButton(onPressed: c.updateBusy ? null : c.checkUpdate, child: const Text('Check for updates')),
+              if (c.updateMessage.isNotEmpty) Text(c.updateMessage),
+            ]),
+          ),
+          const SizedBox(height: 8),
           Align(alignment: Alignment.centerLeft, child: FilledButton(onPressed: _locked ? null : _save, child: const Text('Save'))),
           const Divider(height: 40),
           Text('Export and import', style: Theme.of(context).textTheme.titleMedium),

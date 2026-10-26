@@ -15,3 +15,7 @@ td { padding:2px 0; } td:last-child { text-align:right; opacity:.8; }
 code { background:var(--card); padding:1px 4px; border-radius:3px; word-break:break-all; }
 footer { margin-top:8px; text-align:right; } a { color:inherit; }
 button { font: inherit; padding: 4px 12px; }
+.upd { background:var(--card); border-radius:6px; padding:6px 8px; font-size:12px; }
+.upd a, .upd button { margin-left:6px; }
+.upd button { padding:1px 8px; font-size:12px; }
+.upd .x { float:right; margin:0; border:0; background:none; cursor:pointer; color:inherit; }

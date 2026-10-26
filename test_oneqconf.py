@@ -83,6 +83,15 @@ class TestRelayResolve(unittest.TestCase):
                          ("r1", "/var/lib/oneq/relay/registry.db", "127.0.0.1:8080", True, True, "/ca.pem"))
         self.assertEqual(a.fed_peer, ["https://r2.example.org", "https://r3.example.org"])
 
+    def test_update_options(self):
+        p = write("[relay]\nid = r1\ndb = /a.db\nsecret_file = /s\nupdate_check = no\nupdate_url = https://example.org/rel\nupdate_dir = /u\n")
+        a = self.ns(config=p, no_update_check=False, update_url=None, update_dir=None)
+        oneqrelay.resolve(a, silent_parser(), run=True)
+        self.assertEqual((a.no_update_check, a.update_url, a.update_dir), (True, "https://example.org/rel", "/u"))
+        a = self.ns(config=write("[relay]\nid = r1\ndb = /a.db\nsecret_file = /s\n"), no_update_check=False, update_url=None, update_dir=None)
+        oneqrelay.resolve(a, silent_parser(), run=True)
+        self.assertFalse(a.no_update_check)                      # default: on
+
     def test_command_line_overrides_the_file(self):
         p = write("[relay]\nid = r1\ndb = /a.db\nsecret_file = /s\nlisten = 127.0.0.1:8080\nfederation_peers = https://x\n")
         a = self.ns(config=p, listen="0.0.0.0:9999", fed_peer=["https://cli"])
@@ -128,6 +137,12 @@ class TestNodeResolve(unittest.TestCase):
                     force_relay=False, no_relay=False, relay_after=None, no_config=False)
         base.update(kw)
         return argparse.Namespace(**base)
+
+    def test_update_options(self):
+        a = self.ns(config=write("[lan]\nrelays = https://r\ncommunity = c\nuser = u\nkey_file = /k\nupdate_check = no\nupdate_url = https://e.org/r\n"),
+                    node="lan", no_update_check=False, update_url=None)
+        oneqnode.resolve(a, silent_parser())
+        self.assertEqual((a.no_update_check, a.update_url), (True, "https://e.org/r"))
 
     def test_node_section_over_defaults_and_interface_name(self):
         a = self.ns(config=write(self.CONF), node="lan")

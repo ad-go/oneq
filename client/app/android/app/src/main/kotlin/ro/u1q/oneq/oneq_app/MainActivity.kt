@@ -24,6 +24,9 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ro.1q.oneq/vpn").setMethodCallHandler { call, result ->
             when (call.method) {
                 "filesDir" -> result.success(filesDir.absolutePath)
+                "downloadsDir" -> result.success(
+                    (getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: filesDir).absolutePath
+                )
                 "start" -> {
                     val cfg = call.argument<String>("config")!!
                     val persist = call.argument<Boolean>("persist") ?: false

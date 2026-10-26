@@ -63,6 +63,14 @@ this computer.
   this keeps out other users' programs and tools that only know the port. The status page also checks the `Host` header and sends no CORS headers (web pages cannot read it).
   The extension asks for the `proxy`, `storage` and `alarms` permissions and for access to `127.0.0.1`; it talks to nothing else.
 
+## Update check
+The extension looks at the latest GitHub release (`api.github.com/repos/ad-go/oneq/releases/latest`) about 1-2 minutes after the browser starts and then once a day; the option
+**Check for updates automatically** (Settings, default on) turns this off, and **Check for updates** there always works. When a newer version exists the popup shows a one-line
+banner with `Download` and `Release notes`. `Download` fetches `oneq-mesh-chromium-<v>.zip` (Firefox: `oneq-mesh-firefox-<v>.zip`) over https from GitHub hosts only, verifies its SHA-256
+against the release's `SHA256SUMS`, and only then saves it to the browser's download folder; nothing is installed or run, no cookies or identifiers are sent. Extra permissions:
+`downloads` and the host permissions for `api.github.com`, `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com`. Code: `extension/update.js`,
+tests: `node --test test/update.test.js`. A download needs the popup or settings page to stay open until it is done.
+
 ## Store packages (Chrome Web Store, Edge Add-ons, addons.mozilla.org)
 
 `python client/browser/build-store.py` writes `client/dist-store/` (reproducible, ignored by git): `oneq-mesh-chromium-VERSION.zip` (Chrome, Edge, Brave), `oneq-mesh-firefox-VERSION.zip`

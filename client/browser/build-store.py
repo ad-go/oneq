@@ -41,7 +41,7 @@ def store_manifest(m):
 def firefox_manifest(m):
     m = store_manifest(m)
     m.pop("minimum_chrome_version", None)
-    m["background"] = {"scripts": ["pac.js", "background.js"]}        # Firefox: event page; no service_worker key
+    m["background"] = {"scripts": ["pac.js", "update.js", "background.js"]}        # Firefox: event page; no service_worker key
     # proxy.onRequest can only see requests of hosts the extension has permission for; the mesh addresses are not known in advance
     m["host_permissions"] = sorted(set(m.get("host_permissions", []) + ["<all_urls>"]))
     m["browser_specific_settings"] = {"gecko": {"id": GECKO_ID, "strict_min_version": "140.0",

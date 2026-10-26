@@ -83,10 +83,38 @@ async function render() {
   }
 }
 
+// ---- update banner (from the stored result, no network; dismissible for this popup session)
+let updDismissed = false, updBusy = false, updMsg = '';
+async function renderUpdate() {
+  const box = $('upd');
+  if (updDismissed) { box.hidden = true; return; }
+  const r = await OneqUpdate.lastResult().catch(() => null);
+  if (!r || !r.update_available) { if (!updMsg) { box.hidden = true; return; } }
+  box.hidden = false;
+  if (updBusy || updMsg) { box.replaceChildren(updBusy ? 'Downloading and verifying...' : updMsg); return; }
+  const x = el('button', { class: 'x', title: 'Dismiss', textContent: 'x' });
+  x.addEventListener('click', () => { updDismissed = true; box.hidden = true; });
+  const kids = [x, 'Version ' + r.latest + ' is available (you have ' + r.current + ').'];
+  if (r.asset) {
+    const b = el('button', { textContent: 'Download' });
+    b.addEventListener('click', async () => {
+      updBusy = true; renderUpdate();
+      const d = await OneqUpdate.downloadVerified(r);
+      updBusy = false;
+      updMsg = d.ok ? 'Downloaded and verified: ' + d.path + '. Install it when you are ready.' : 'Download failed: ' + d.error;
+      renderUpdate();
+    });
+    kids.push(b);
+  }
+  if (r.url) kids.push(el('a', { href: r.url, target: '_blank', rel: 'noopener noreferrer', textContent: 'Release notes' }));
+  box.replaceChildren(...kids);
+}
+
 $('enabled').addEventListener('change', async e => {
   await chrome.runtime.sendMessage({ type: 'set', values: { enabled: e.target.checked } });
   render();
 });
 $('opts').addEventListener('click', e => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
 render();
+renderUpdate();
 setInterval(render, 3000);

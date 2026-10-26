@@ -58,6 +58,7 @@ import oneqconf
 import oneqnat
 import oneqpop
 import oneqtotp
+import onequpdate
 from rendezvous_server import Bucket, HEX32, valid_endpoint
 
 log = logging.getLogger("oneqrelay")
@@ -112,7 +113,8 @@ class OneqRelay:
                  trust_proxy: bool = False, sync_interval: float = SYNC_INTERVAL,
                  admin_password: Optional[str] = None, info: Optional[dict] = None,
                  stun: Optional["oneqnat.StunServer"] = None, admin_totp: Optional["oneqtotp.TotpStore"] = None,
-                 admin_allow=(), require_pop: bool = False):
+                 admin_allow=(), require_pop: bool = False,
+                 update_check: bool = True, update_url: Optional[str] = None, update_dir: str = "/var/lib/oneq/relay/updates"):
         self.store, self.secret = store, secret
         self.require_pop = require_pop       # every registration must prove possession of the node key (see oneqpop)
         self.pop_key = oneqpop.server_key(secret)
@@ -133,6 +135,9 @@ class OneqRelay:
         self.nat_test_rate = {}              # (comm, node) -> Bucket
         self.nat_test_loopback = False       # tests only: allow probing 127.0.0.1
         self.guard = LoginGuard()
+        self.update_check = update_check     # automatic check for a newer release (the admin page can always check by hand)
+        self.update_dir = update_dir
+        self.updater = onequpdate.Checker(VERSION, "relay", update_url or None, cafile=None, enabled=update_check)
         self.rate = {}
         self.relays = {}                 # (comm, node_hex) -> (ws, user)
         self.fed_links = {}              # origin -> ws
@@ -731,6 +736,8 @@ class OneqRelay:
             await self.stun.start()
         self.tasks.append(asyncio.ensure_future(self._housekeeping()))
         self.tasks.append(asyncio.ensure_future(self._sync_loop()))        # idle until there is a peer
+        if self.update_check:
+            self.tasks.append(asyncio.ensure_future(self.updater.loop(log)))
         for p in self.fed_peers:
             self._start_peer(p)
 
@@ -875,7 +882,9 @@ async def serve(args):
             raise SystemExit("the admin page needs a second factor: create one with `oneqrelay admin-totp --out FILE` and set admin_totp_file")
     sn = OneqRelay(store, load_secret(args.secret_file), args.fed_peer, args.cafile, args.trust_proxy,
                   admin_password=load_admin_password(args.admin_password_file) if args.admin_password_file else None,
-                  info=info, stun=stun, admin_totp=totp, admin_allow=args.admin_allow or (), require_pop=bool(args.require_pop))
+                  info=info, stun=stun, admin_totp=totp, admin_allow=args.admin_allow or (), require_pop=bool(args.require_pop),
+                  update_check=not args.no_update_check, update_url=args.update_url or None,
+                  update_dir=args.update_dir or "/var/lib/oneq/relay/updates")
     ssl_ctx = None
     if not args.insecure_http:
         if not (args.cert and args.key):
@@ -893,7 +902,7 @@ async def serve(args):
 
 RELAY_KEYS = {"id", "db", "secret_file", "listen", "cert", "key", "insecure_http", "trust_proxy",
               "federation_peers", "cafile", "init", "admin_password_file", "stun", "stun_port", "stun_alt_port", "stun_change_port",
-              "admin_totp_file", "admin_allow", "require_pop"}
+              "admin_totp_file", "admin_allow", "require_pop", "update_check", "update_url", "update_dir"}
 RELAY_SPEC = {"id": ("id", oneqconf.to_str), "db": ("db", oneqconf.to_str), "secret_file": ("secret_file", oneqconf.to_str),
               "listen": ("listen", oneqconf.to_str), "cert": ("cert", oneqconf.to_str), "key": ("key", oneqconf.to_str),
               "insecure_http": ("insecure_http", oneqconf.to_bool), "trust_proxy": ("trust_proxy", oneqconf.to_bool),
@@ -903,7 +912,9 @@ RELAY_SPEC = {"id": ("id", oneqconf.to_str), "db": ("db", oneqconf.to_str), "sec
               "stun_port": ("stun_port", lambda v, k: int(v)), "stun_alt_port": ("stun_alt_port", lambda v, k: int(v)),
               "stun_change_port": ("stun_change_port", lambda v, k: int(v)),
               "admin_totp_file": ("admin_totp_file", oneqconf.to_str), "admin_allow": ("admin_allow", oneqconf.to_list),
-              "require_pop": ("require_pop", oneqconf.to_bool)}
+              "require_pop": ("require_pop", oneqconf.to_bool),
+              "no_update_check": ("update_check", lambda v, k: not oneqconf.to_bool(v, k)),
+              "update_url": ("update_url", oneqconf.to_str), "update_dir": ("update_dir", oneqconf.to_str)}
 
 
 def resolve(args, parser, run: bool):
@@ -966,6 +977,9 @@ def main(argv=None):
     r.add_argument("--admin-allow", action="append", default=[], metavar="CIDR", help="limit the admin page to these networks (404 for others)")
     r.add_argument("--require-pop", action="store_true", default=None, help="refuse registrations without a proof of possession of the node key "
                    "(older nodes cannot give one); without it a node that registered once with a proof can no longer be updated without one")
+    r.add_argument("--no-update-check", action="store_true", help="do not look for a newer release automatically (update_check = no)")
+    r.add_argument("--update-url", help="release API URL (default: GitHub releases of ad-go/oneq)")
+    r.add_argument("--update-dir", help="where downloaded updates are kept (default /var/lib/oneq/relay/updates)")
     r.add_argument("--admin-password-file", help="enables the admin page at /admin/ (file with the operator password, mode 600)")
     r.add_argument("-v", "--verbose", action="store_true")
     a = sub.add_parser("admin", help="manage communities, users and nodes (works on the same --db as a running server)")
