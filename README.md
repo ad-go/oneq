@@ -1,163 +1,162 @@
-# VPN post-cuantic: mesh oneqrelay/oneqnode și punct-la-punct oneqtunel
+# Post-quantum VPN: mesh oneqrelay/oneqnode and point-to-point oneqtunel
 
-# Două moduri de lucru
+# Two modes of operation
 
-1. **Rețea mesh L2 cu utilizatori și parole (recomandat):** `oneqrelay` (servere federate) + `oneqnode` (noduri L2/TAP), IP/MAC alocate automat. Descrierea completă: [ARCHITECTURE.md](ARCHITECTURE.md). Specificația formală a protocolului de fir (formate, chei, transcript, model de amenințare, ce nu garantează): [specifications.html](specifications.html), verificată cu `spec_check.py`.
-2. **Punct-la-punct (`oneqtunel.py`):** un tunel L3 între două noduri cu chei schimbate manual; secțiunile de mai jos.
+1. **L2 mesh network with users and passwords (recommended):** `oneqrelay` (federated servers) + `oneqnode` (L2/TAP nodes), IP/MAC allocated automatically. Full description: [ARCHITECTURE.md](ARCHITECTURE.md). Formal wire protocol specification (formats, keys, transcript, threat model, what is not guaranteed): [specifications.html](specifications.html), verified with `spec_check.py`.
+2. **Point-to-point (`oneqtunel.py`):** an L3 tunnel between two nodes with manually exchanged keys; see the sections below.
 
-Instalarea clienților (Windows, macOS, Debian, Android), cu exemple de comenzi: [client/README.md](client/README.md#installing-a-client-examples).
+Installing clients (Windows, macOS, Debian, Android), with command examples: [client/README.md](client/README.md#installing-a-client-examples).
 
-## Pachete Debian (Debian 13, amd64)
+## Debian packages (Debian 13, amd64)
 
-Două pachete, `oneqrelay` și `oneqnode`, instalează aplicația în **`/opt/oneq/relay`** și **`/opt/oneq/node`** (bibliotecile Python incluse), cu comenzile legate în `/usr/bin`, și o configurează din fișiere reale:
+Two packages, `oneqrelay` and `oneqnode`, install the application in **`/opt/oneq/relay`** and **`/opt/oneq/node`** (Python libraries included), with commands linked in `/usr/bin`, and configure it from dedicated files:
 
-| Fișier | Rol |
+| File | Role |
 |---|---|
-| `/etc/oneq/relay.conf` | configurarea oneqrelay (INI, secțiunea `[relay]`): `id`, `listen`, `db`, `secret_file`, `federation_peers`, `cert`/`key`, `init` |
-| `/etc/oneq/node.conf` | configurarea oneqnode: `[defaults]` plus câte o secțiune `[NUME]` per nod (`relays`, `community`, `user`, `key_file`, `password_file`, `advertise`, …) |
+| `/etc/oneq/relay.conf` | oneqrelay configuration (INI, section `[relay]`): `id`, `listen`, `db`, `secret_file`, `federation_peers`, `cert`/`key`, `init` |
+| `/etc/oneq/node.conf` | oneqnode configuration: `[defaults]` plus one `[NAME]` section per node (`relays`, `community`, `user`, `key_file`, `password_file`, `advertise`, …) |
 
-Opțiunile din linia de comandă le suprascriu; o opțiune scrisă greșit oprește serviciul cu un mesaj clar. Cheile și parolele nu stau în aceste fișiere, ci în fișiere separate (`/etc/oneq/relay.secret`, `/etc/oneq/node-NUME.key`, `node-NUME.password`, mod 0600), referite prin cale.
+Command-line options override file settings; a misspelled option stops the service with a clear message. Keys and passwords are not stored in these files, but in separate files (`/etc/oneq/relay.secret`, `/etc/oneq/node-NAME.key`, `node-NAME.password`, mode 0600), referenced by path.
 
 ```sh
-sudo apt install ./oneq-server_0.0.1_all.deb ./oneqnode_0.0.1_amd64.deb ./oneqrelay_0.0.1_amd64.deb    # server: nod + relay (doar nod: ./oneqnode_0.0.1_amd64.deb); sau din depozitul apt (repo/README.md)
+sudo apt install ./oneq-server_0.0.1_all.deb ./oneqnode_0.0.1_amd64.deb ./oneqrelay_0.0.1_amd64.deb    # server: node + relay (node only: ./oneqnode_0.0.1_amd64.deb); or from the apt repository (repo/README.md)
 sudo oneqrelay-admin community-add lan 10.50.0.0/24
 sudo oneqrelay-admin user-add lan alice --role admin
 sudo oneqnode-init lan --relay https://r1.example.org --community lan --user alice
 ```
 
-Serviciile pornesc sub systemd sau supervisord (detectat, sau `init =` în fișierul de configurare). Construire: `packaging/build-debs.sh`; depozit semnat: `packaging/make-repo.sh` + `packaging/sign-repo.sh`; teste: `packaging/{smoke,service,repo}-test.sh`.
-Depozitul apt semnat este în Gitea, `ad-go/oneq-apt` (0.0.1, trixie/amd64; cheia `oneq-archive-keyring.gpg`, amprenta `4C33 A0A0 1EC9 798B 53EE 638D 1F87 9861 4F16 22ED`); `oneq.sources` conține un URL substituent (`https://apt.example.org/oneq`) până când directorul e servit de un server web.
+Services start under systemd or supervisord (auto-detected, or `init =` in the config file). Build: `packaging/build-debs.sh`; signed repository: `packaging/make-repo.sh` + `packaging/sign-repo.sh`; tests: `packaging/{smoke,service,repo}-test.sh`.
+The signed apt repository is in Gitea, `ad-go/oneq-apt` (0.0.1, trixie/amd64; key `oneq-archive-keyring.gpg`, fingerprint `4C33 A0A0 1EC9 798B 53EE 638D 1F87 9861 4F16 22ED`); `oneq.sources` contains a placeholder URL (`https://apt.example.org/oneq`) until the directory is served by a web server.
 
-## Rețea mesh: pornire rapidă
+## Mesh network: quick start
 
 ```sh
-# 1. Același secret al federației pe toate oneqrelay-urile
+# 1. Same federation secret on all oneqrelay instances
 oneqrelay.py gen-secret > federation.secret && chmod 600 federation.secret
 
-# 2. Pe primul oneqrelay: comunitate și utilizatori (parola din fișier / $TUNMESH_PASSWORD / prompt, niciodată din argumente)
+# 2. On the first oneqrelay: community and users (password from file / $TUNMESH_PASSWORD / prompt, never from arguments)
 oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret community-add lan 10.50.0.0/24
 oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret user-add lan alice --role admin --password-file alice.pw
 oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret list
 
-# 3. Pornești oneqrelay-urile (TLS 1.3 doar X25519MLKEM768); conturile și nodurile se replică între ele
+# 3. Start the oneqrelay instances (TLS 1.3, X25519MLKEM768 only); accounts and nodes replicate between them
 oneqrelay.py run --id r1 --db r1.db --secret-file federation.secret --listen 0.0.0.0:8443     --cert fullchain.pem --key privkey.pem --fed-peer https://r2.example.org:8443 --cafile ca.pem
 oneqrelay.py run --id r2 --db r2.db --secret-file federation.secret ... --fed-peer https://r1.example.org:8443
 
-# 4. Pe fiecare nod: cheie proprie, apoi intri în comunitate (IP și MAC vin de la oneqrelay)
+# 4. On each node: own key, then join the community (IP and MAC come from oneqrelay)
 oneqnode.py genkey --key node.key
 oneqnode.py run --key node.key --relay https://r1.example.org:8443 --relay https://r2.example.org:8443     --community lan --user alice --password-file alice.pw --name laptop --advertise 203.0.113.5:51820 --listen 0.0.0.0:51820
 ```
 
-- Mai multe `--relay` = failover automat. Un `oneqnode` rămâne în rețea și când toate oneqrelay-urile cad.
-- Administrarea (`oneqrelay.py admin`): `community-add`, `community-subnet`, `user-add`, `user-passwd`, `user-disable`, `user-enable`, `user-del`, `node-del`, `relay-grant`, `relay-revoke`, `route-add`, `route-del`, `list`.
-  Schimbarea parolei sau dezactivarea revocă imediat toate token-urile contului, pe toată federația. `community-subnet COMUNITATE 10.10.10.0/24` mută comunitatea pe alt subnet: fiecare nod primește o adresă nouă (MAC-urile, cheile, utilizatorii și rutele rămân)
-  și o preia la repornire; se refuză dacă noul subnet e prea mic sau acoperă o rută.
-- Legat la adresa unei interfețe existente: `oneqnode.py run ... --via IFACE`. Interfața rămâne a procesului care o ține (nu se partajează); `oneqnode` își face propriul TAP.
-- Producție: `deploy/oneqrelay.service`, `deploy/oneqnode@.service`, `deploy/nginx-oneqrelay.conf`, `deploy/oneqnode.env.example`.
-- Teste mesh: `test_mesh_core.py`, `test_oneqrelay.py`, `test_oneqnode.py` (fără root), `sudo python3 test_e2e_mesh.py` (TAP reale, 2 oneqrelay + 3 oneqnode în namespace-uri: direct, relay forțat prin federație, fallback + failover + revenire, conturi).
+- Multiple `--relay` = automatic failover. A `oneqnode` stays on the network even when all oneqrelay instances go down.
+- Administration (`oneqrelay.py admin`): `community-add`, `community-subnet`, `user-add`, `user-passwd`, `user-disable`, `user-enable`, `user-del`, `node-del`, `relay-grant`, `relay-revoke`, `route-add`, `route-del`, `list`.
+  Changing the password or disabling an account immediately revokes all its tokens across the entire federation. `community-subnet COMMUNITY 10.10.10.0/24` moves the community to a different subnet: each node gets a new address (MACs, keys, users and routes remain)
+  and picks it up on restart; rejected if the new subnet is too small or overlaps a route.
+- Bound to the address of an existing interface: `oneqnode.py run ... --via IFACE`. The interface belongs to the process that created it (not shared); `oneqnode` creates its own TAP.
+- Production: `deploy/oneqrelay.service`, `deploy/oneqnode@.service`, `deploy/nginx-oneqrelay.conf`, `deploy/oneqnode.env.example`.
+- Mesh tests: `test_mesh_core.py`, `test_oneqrelay.py`, `test_oneqnode.py` (no root), `sudo python3 test_e2e_mesh.py` (real TAPs, 2 oneqrelay + 3 oneqnode in namespaces: direct, relay forced through federation, fallback + failover + recovery, accounts).
 
 ---
 
-## Noduri delegate ca relay
+## Nodes delegated as relays
 
-Federația poate **delega noduri obișnuite să facă relay** pentru ceilalți membri, fără să le dea vreun secret. Nodul se oferă (`relay_offer = yes` în `node.conf`, `--relay-offer`),
-administratorul îl delegă (pagina de admin: butonul „Delegate…” pe nod, sau `oneqrelay admin relay-grant COMUNITATE NODE [--max-kbps N] [--days D] [--force]`), iar nodurile care nu se
-pot atinge direct își trimit pachetele (criptate cap-la-cap) prin el, pe UDP, înainte de a recurge la relay-ul WebSocket al `oneqrelay`. Condiții: nodul trebuie să fie accesibil din
-exterior (NAT `open` sau `cone`, măsurat de STUN), iar toate relay-urile federației să cunoască delegările. Revocarea: `relay-revoke` sau „Withdraw”. Detalii: ARCHITECTURE.md.
+The federation can **delegate ordinary nodes to relay packets** for other members when they cannot reach each other directly. The node offers itself (`relay_offer = yes` in `node.conf`, `--relay-offer`),
+the administrator delegates it (admin page: "Delegate…" button on the node, or `oneqrelay admin relay-grant COMMUNITY NODE [--max-kbps N] [--days D] [--force]`), and nodes that
+cannot reach each other directly send their packets (end-to-end encrypted) through it, over UDP, before falling back to the WebSocket relay of `oneqrelay`. Requirements: the node must be
+reachable from outside (NAT `open` or `cone`, measured by STUN), and all relay servers in the federation must know the delegations. Revocation: `relay-revoke` or "Withdraw". Details: ARCHITECTURE.md.
 
-## Rute printr-un nod gateway
+## Routes through a gateway node
 
-O rețea privată din spatele unui membru (de ex. `192.168.16.0/24`) poate fi făcută accesibilă transparent celorlalți membri. Administratorul o anunță printr-un nod **gateway**:
+A private network behind a member (e.g. `192.168.16.0/24`) can be made transparently accessible to other members. The administrator announces it via a **gateway** node:
 
-    oneqrelay admin route-add COMUNITATE 192.168.16.0/24 NOD [--prio 100]      # NOD: id, prefix de id (8+ cifre) sau nume; sau pagina de admin, secțiunea „Routes”
-    oneqrelay admin route-del COMUNITATE 192.168.16.0/24 [NOD]                 # un gateway, sau toate
+    oneqrelay admin route-add COMMUNITY 192.168.16.0/24 NODE [--prio 100]      # NODE: id, id prefix (8+ digits) or name; or admin page, "Routes" section
+    oneqrelay admin route-del COMMUNITY 192.168.16.0/24 [NODE]                 # one gateway, or all
 
-Aceeași rețea poate avea până la 4 gateway-uri (redundanță): clientul folosește cel cu prioritatea cea mai bună dintre cele care răspund și trece la următorul când acela tace, fără să revină singur.
-Gatewayul este un nod obișnuit cu `ip_forward` și NAT (`deploy/oneq-gateway`, `deploy/oneq-gateway.service`: doar rețeaua anunțată iese din mesh). Clienții Rust primesc rutele cu `--accept-routes`
-(`accept_routes` în configurația serviciului, implicit oprit) și acceptă doar rețele private din afara mesh-ului. Detalii: ARCHITECTURE.md, `client/README.md`.
+The same network can have up to 4 gateways (redundancy): the client uses the one with the best priority among those that respond, and switches to the next when it goes silent, without switching back automatically.
+The gateway is an ordinary node with `ip_forward` and NAT (`deploy/oneq-gateway`, `deploy/oneq-gateway.service`: only the announced network exits the mesh). Rust clients receive routes with `--accept-routes`
+(`accept_routes` in the service configuration, off by default) and accept only private networks outside the mesh. Details: ARCHITECTURE.md, `client/README.md`.
 
-## Relay pe Windows și macOS
+## Relay on Windows and macOS
 
-Pachetele pentru Windows și macOS (`client/package-desktop.py`) conțin și nodul, și relay-ul (cu Python 3.13 / OpenSSL 3.5 propriu): `oneqclient relay init`, apoi
-`oneqclient relay install` (serviciu Windows `oneqrelay` / daemon launchd), vezi `client/README.md`. Pe Android nu există relay (doar nodul): relay-ul e în Python.
-`oneqrelay init --dir DIR --name HOST` face aceeași configurare pe orice mașină fără pachetul Debian.
+The Windows and macOS packages (`client/package-desktop.py`) include both the node and the relay (with bundled Python 3.13 / OpenSSL 3.5): `oneqclient relay init`, then
+`oneqclient relay install` (Windows service `oneqrelay` / launchd daemon), see `client/README.md`. Android has no relay (node only): the relay is in Python.
+`oneqrelay init --dir DIR --name HOST` performs the same setup on any machine without the Debian package.
 
-## Pagina de administrare a oneqrelay
+## oneqrelay admin page
 
-Fiecare oneqrelay poate servi o pagină de administrare pe același port TLS: `https://<relay>/admin/`. Este oprită până setezi
-`admin_password_file` în `/etc/oneq/relay.conf` (parola operatorului, fișier mod 0600 al utilizatorului `oneqrelay`). **Al doilea factor
-este obligatoriu**: coduri TOTP (RFC 6238) din orice aplicație de tip authenticator (Google/Microsoft Authenticator, Aegis, FreeOTP, 1Password…).
-Fără `admin_totp_file` relay-ul refuză să pornească pagina: autentificarea în doi pași e obligatorie, din orice rețea.
+Each oneqrelay can serve an admin page on the same TLS port: `https://<relay>/admin/`. It is disabled until you set
+`admin_password_file` in `/etc/oneq/relay.conf` (the operator password, a mode 0600 file owned by the `oneqrelay` user). **A second factor
+is mandatory**: TOTP codes (RFC 6238) from any authenticator app (Google/Microsoft Authenticator, Aegis, FreeOTP, 1Password…).
+Without `admin_totp_file` the relay refuses to start the page: two-factor authentication is required, from any network.
 
-    sudo -u oneqrelay oneqrelay gen-admin-password --out /etc/oneq/admin.pw      # scrie fișierul (0600) și afișează parola o dată
+    sudo -u oneqrelay oneqrelay gen-admin-password --out /etc/oneq/admin.pw      # writes the file (0600) and prints the password once
     sudo -u oneqrelay oneqrelay admin-totp --out /var/lib/oneq/relay/admin.totp --issuer "oneqrelay x" \
-         --save-enrolment /tmp/enrol.txt                                       # QR în terminal, link otpauth, secret, 10 coduri de recuperare
-    # în relay.conf:  admin_password_file = /etc/oneq/admin.pw
+         --save-enrolment /tmp/enrol.txt                                       # QR in terminal, otpauth link, secret, 10 recovery codes
+    # in relay.conf:  admin_password_file = /etc/oneq/admin.pw
     #                 admin_totp_file     = /var/lib/oneq/relay/admin.totp
-    #                 admin_allow         = 203.0.113.0/24, 10.0.0.0/8      # opțional: ceilalți primesc 404
-    # apoi: systemctl restart oneqrelay
+    #                 admin_allow         = 203.0.113.0/24, 10.0.0.0/8      # optional: others get 404
+    # then: systemctl restart oneqrelay
 
-Fișierul TOTP stă în `/var/lib/oneq/relay`, nu în `/etc`: serviciul îl rescrie la fiecare login (ultimul pas folosit, codurile de recuperare consumate),
-iar systemd montează `/etc` doar-citire pentru el; relay-ul verifică la pornire că îl poate scrie.
+The TOTP file lives in `/var/lib/oneq/relay`, not in `/etc`: the service rewrites it on every login (last step used, consumed recovery codes),
+and systemd mounts `/etc` read-only for it; the relay checks at startup that it can write the file.
 
-Pagina are trei secțiuni:
+The page has three sections:
 
-* **Relay**: setările efective (id, port, transport TLS-PQ, bază de date, CA de federație, configurația), versiune, uptime,
-  noduri atașate, totaluri și limitele din această versiune. Setările din fișier se schimbă în `relay.conf` (cu restart).
-* **Federație**: peer-ii, vârsta ultimei sincronizări, legăturile de relay active și amprenta secretului federației (aceeași pe
-  toate relay-urile). Peer-ii se pot adăuga/scoate din pagină (rămân salvați local); cei din `relay.conf` doar se afișează.
-  Replicarea *trage* date de la peer: pentru legătură în ambele sensuri adaugi peer-ul și pe celălalt relay.
-* **Comunități**: creare, modificare (MTU, număr maxim de noduri), ștergere în cascadă (cere numele comunității); per comunitate
-  utilizatori (adăugare, parolă nouă, activare/dezactivare, rol, cotă de noduri, ștergere) și noduri (adresă, MAC, proprietar,
-  stare, relay-ul de care sunt atașate, scoatere). Modificările trec prin registrul replicat, deci ajung pe toate relay-urile.
+* **Relay**: effective settings (id, port, TLS-PQ transport, database, federation CA, configuration), version, uptime,
+  attached nodes, totals and limits for this version. File settings are changed in `relay.conf` (with a restart).
+* **Federation**: peers, age of last synchronization, active relay links and the federation secret fingerprint (the same on
+  all relay instances). Peers can be added/removed from the page (stored locally); those from `relay.conf` are only displayed.
+  Replication *pulls* data from peers: for a bidirectional link, add the peer on the other relay too.
+* **Communities**: create, modify (MTU, maximum number of nodes), cascade delete (requires community name); per community
+  users (add, new password, enable/disable, role, node quota, delete) and nodes (address, MAC, owner,
+  status, attached relay, remove). Changes go through the replicated registry, so they reach all relay instances.
 
-Autentificare: parolă + cod din aplicație (fereastră de ±30 s pentru ceasuri diferite). Un cod nu poate fi folosit de două ori (nici după repornire:
-ultimul pas acceptat e salvat), un cod greșit sau o parolă greșită dau același mesaj și aceeași blocare (5 eșecuri → 60 s, apoi dublu până la 15 min),
-codul se consumă doar dacă parola era corectă, iar dacă starea nu poate fi salvată codul e refuzat. Cele 10 coduri de recuperare (hash în fișier) merg o singură dată.
-Securitate: jeton de operator semnat HMAC (1 h) ținut doar în memoria paginii (fără cookie), blocare după eșecuri repetate,
-CSP strict fără resurse externe, fiecare modificare apare în jurnal cu adresa clientului. Un jeton de utilizator de comunitate
-(chiar cu rol `admin`) nu are acces. Parola nu se afișează și nu se stochează în pagină.
+Authentication: password + code from the app (±30 s window for clock differences). A code cannot be used twice (not even after a restart:
+the last accepted step is saved), a wrong code or wrong password give the same message and the same lockout (5 failures → 60 s, then doubling up to 15 min),
+the code is consumed only if the password was correct, and if the state cannot be saved the code is rejected. The 10 recovery codes (hashed in the file) work only once.
+Security: HMAC-signed operator token (1 h) kept only in page memory (no cookie), lockout after repeated failures,
+strict CSP with no external resources, every change is logged with the client address. A community user token
+(even with `admin` role) has no access. The password is not displayed and not stored in the page.
 
-## Dovada de posesie a cheii nodului
+## Node key proof of possession
 
 *English version: [POP.md](POP.md).*
 
-`node_id` este hash-ul cheii publice, iar cheile publice nu sunt secrete (lista de membri le arată). Fără o dovadă, oricine are un token (modul punct-la-punct) sau un cont
-(mesh) ar putea înregistra cheia altcuiva cu adrese proprii sau ar putea ocupa `node_id`-ul înainte de proprietar. Cheile nodurilor sunt chei KEM (X25519 + ML-KEM-768), nu chei de
-semnătură, deci dovada e o **provocare** pe care o deschide doar deținătorul cheii private (`oneqpop.py`):
+`node_id` is the hash of the public key, and public keys are not secret (the member list shows them). Without a proof, anyone with a token (point-to-point mode) or an account
+(mesh) could register someone else's key with their own addresses or could claim a `node_id` before its owner. Node keys are KEM keys (X25519 + ML-KEM-768), not signing keys,
+so the proof is a **challenge** that only the holder of the private key can open (`oneqpop.py`):
 
-1. Nodul cere `POST /v1/c/<comunitate>/nodes/<id>/challenge` (modul punct-la-punct: `POST /v1/nodes/<id>/challenge`) cu cheia publică.
-2. Serverul încapsulează ML-KEM către cheia nodului, face un schimb X25519 efemer–static și sigilează un secret `R = HMAC(cheia_serverului, nonce | exp | node_id)`. **Nu ține stare**:
-   la federație, `cheia_serverului` e derivată din secretul comun, deci orice relay verifică o provocare făcută de altul.
-3. Nodul deschide provocarea și răspunde cu `HMAC(R, "proof" | node_id | nonce | exp)`, trimis în `PUT` ca `pop` (valabil 60 s și reutilizat până aproape de expirare).
+1. The node sends `POST /v1/c/<community>/nodes/<id>/challenge` (point-to-point mode: `POST /v1/nodes/<id>/challenge`) with the public key.
+2. The server encapsulates ML-KEM towards the node's key, performs an ephemeral–static X25519 exchange and seals a secret `R = HMAC(server_key, nonce | exp | node_id)`. **Stateless**:
+   in a federation, `server_key` is derived from the shared secret, so any relay can verify a challenge made by another.
+3. The node opens the challenge and responds with `HMAC(R, "proof" | node_id | nonce | exp)`, sent in `PUT` as `pop` (valid for 60 s and reused until close to expiry).
 
-Reguli: un nod înregistrat o dată cu dovadă **nu mai poate fi actualizat fără dovadă** (apără și împotriva coborârii în grad); `--require-pop` (`require_pop = yes`) refuză orice
-înregistrare fără dovadă; un administrator poate reseta un `node_id` ștergând nodul. În modul punct-la-punct, și slotul de relay WebSocket al unui nod verificat cere dovada
-(`X-Oneq-Pop`). Un relay care nu cunoaște provocarea răspunde 404, iar nodul face o înregistrare simplă (compatibilitate). Dovada nu acoperă restul cererii: apără de cine **nu** are cheia, nu de un
-atacator care citește fluxul TLS. Clientul Rust și cel Python implementează același protocol. Pachetul `oneqrelay` depinde de `cryptography` (ML-KEM).
+Rules: a node registered once with a proof **can no longer be updated without a proof** (also protects against downgrade attacks); `--require-pop` (`require_pop = yes`) rejects any
+registration without a proof; an administrator can reset a `node_id` by deleting the node. In point-to-point mode, the WebSocket relay slot of a verified node also requires the proof
+(`X-Oneq-Pop`). A relay that does not know the challenge responds with 404, and the node falls back to a simple registration (compatibility). The proof does not cover the rest of the request: it protects against those who **do not** have the key, not against an attacker who can read the TLS stream. The Rust and Python clients implement the same protocol. The `oneqrelay` package depends on `cryptography` (ML-KEM).
 
-## Noduri în spatele NAT
+## Nodes behind NAT
 
 *English version of this section: [NAT.md](NAT.md).*
 
-Orice nod ajunge la oricine prin relay (WebSocket, mereu atașat). Calea directă UDP se obține în plus, dacă NAT-urile permit.
+Any node can reach any other node through the relay (WebSocket, always attached). A direct UDP path is established in addition, if the NATs allow it.
 
-**Ce face `oneqrelay`.** Pornește implicit un serviciu STUN (RFC 5389, cu `CHANGE-REQUEST` pe port ca în RFC 5780) pe **trei porturi UDP**
-ale adresei de ascultare: portul `listen`, +1 și +2 (`stun`, `stun_port`, `stun_alt_port`, `stun_change_port` în `relay.conf`; trebuie
-deschise în firewall). Poate testa și dacă un nod acceptă pachete nesolicitate: `POST /v1/c/<comunitate>/nodes/<id>/nat-test`
-trimite un Binding request dintr-un port pe care nodul nu l-a contactat niciodată (doar către adresa publică a apelantului;
-loopback/link-local/multicast sunt refuzate; o probă la 5 s per nod).
+**What `oneqrelay` does.** It starts by default a STUN service (RFC 5389, with `CHANGE-REQUEST` on port as in RFC 5780) on **three UDP ports**
+of the listen address: the `listen` port, +1 and +2 (`stun`, `stun_port`, `stun_alt_port`, `stun_change_port` in `relay.conf`; must be
+opened in the firewall). It can also test whether a node accepts unsolicited packets: `POST /v1/c/<community>/nodes/<id>/nat-test`
+sends a Binding request from a port the node has never contacted (only to the caller's public address;
+loopback/link-local/multicast are rejected; one probe per 5 s per node).
 
-**Ce face nodul** (`oneqnode`, clientul Rust, aplicațiile): trei tranzacții STUN de pe același socket UDP cu care face traficul:
-1. portul principal → adresa publică M1 (fără răspuns = `blocked`);
-2. portul alternativ → M2; M2 ≠ M1 ⇒ maparea depinde de destinație ⇒ `symmetric`;
-3. portul principal cu change-port ⇒ răspunsul vine de pe al treilea port, necontactat: dacă ajunge ⇒ `cone`, altfel `port-restricted`
-   (adresa locală = M1 ⇒ `open`, fără NAT).
-Rezultatul (tip, adresă publică, „inbound”) apare în registru, în pagina de administrare și în aplicații; adresa publică devine
-candidat pentru ceilalți (nu la `symmetric`: portul se schimbă cu destinația). Se măsoară din nou la 5 min sau când maparea se schimbă.
-`oneqnode nat-check HOST:PORT` arată rezultatul fără să intre în comunitate.
+**What the node does** (`oneqnode`, Rust client, apps): three STUN transactions on the same UDP socket used for traffic:
+1. main port → public address M1 (no response = `blocked`);
+2. alternate port → M2; M2 ≠ M1 ⇒ mapping depends on destination ⇒ `symmetric`;
+3. main port with change-port ⇒ response comes from the third port, never contacted: if it arrives ⇒ `cone`, otherwise `port-restricted`
+   (local address = M1 ⇒ `open`, no NAT).
+The result (type, public address, "inbound") appears in the registry, on the admin page and in apps; the public address becomes
+a candidate for others (not for `symmetric`: port changes with destination). Measured again every 5 min or when the mapping changes.
+`oneqnode nat-check HOST:PORT` shows the result without joining a community.
 
-**Care perechi se conectează direct**
+**Which pairs connect directly**
 
 | | open | cone | port-restricted | symmetric |
 |---|---|---|---|---|
@@ -166,169 +165,163 @@ candidat pentru ceilalți (nu la `symmetric`: portul se schimbă cu destinația)
 | **port-restricted** | direct | direct | direct | relay |
 | **symmetric** | direct | direct | relay | relay |
 
-Perechile „relay” nu așteaptă 10 s: nodurile știu dinainte că nu se poate și merg imediat pe relay (traficul funcționează la fel).
-Tabelul e cel de bază; patru mecanisme îl schimbă (secțiunile de mai jos): maparea unui port pe router, predicția de porturi, al doilea NAT și IPv6.
+"Relay" pairs do not wait 10 s: nodes know in advance that a direct path is not possible and go directly to the relay (traffic works the same way).
+This is the basic table; four mechanisms change it (sections below): port mapping on the router, port prediction, double NAT and IPv6.
 
-| Situație | Regulă |
+| Situation | Rule |
 |---|---|
-| simetric cu pas de port previzibil (`delta`) față de port-restricted | direct (celălalt capăt sondează porturile prezise) |
-| simetric față de simetric, **ambele** cu `delta` | direct |
-| o parte cu al doilea NAT (`cgnat`) | relay imediat, în afară de cazul în care celălalt capăt e `open` |
-| ambele părți au IPv6 global | se încearcă mereu direct (nu există traducere, doar un firewall cu stare) |
-| mapare pe router verificată din exterior | se publică `open` |
+| symmetric with predictable port step (`delta`) vs port-restricted | direct (the other end probes the predicted ports) |
+| symmetric vs symmetric, **both** with `delta` | direct |
+| one side with a second NAT (`cgnat`) | immediate relay, unless the other side is `open` |
+| both sides have a global IPv6 address | always tries direct (no translation, only a stateful firewall) |
+| port mapping on router verified from outside | published as `open` |
 
-**Sincronizarea hole punching-ului.** Între două NAT-uri care filtrează, un pachet care ajunge la un NAT *înainte* ca acel NAT să fi
-trimis ceva „otrăvește” tabela de conexiuni (netfilter: maparea următoare trece pe alt port) și retrimiterea o menține vie. De aceea
-cele două noduri nu trimit pachete nesolicitate decât în **runde** aliniate la ceasul relay-ului (măsurat la fiecare înregistrare,
-eroare ≤ jumătate din RTT): la fiecare 4 s, în primele 3 runde din 10 (liniștea de ~32 s lasă starea eșuată să expire), în rafale de 4
-pachete. Când sosește un pachet de la celălalt capăt, „gaura” e folosită imediat (INIT sau probă), către acea adresă și numai către IP-uri
-înregistrate de el (o adresă falsificată nu declanșează un handshake de 2 KB spre un terț). Între un nod `open`/`cone` și oricine, se
-păstrează încercările continue de dinainte.
+**Hole punching synchronization.** Between two filtering NATs, a packet arriving at a NAT *before* that NAT has sent anything "poisons" the connection table (netfilter: the next mapping uses a different port) and retransmitting keeps it alive. Therefore the two nodes only send unsolicited packets in **rounds** aligned to the relay's clock (measured at each registration, error ≤ half the RTT): every 4 s, in the first 3 rounds out of 10 (the ~32 s silence lets failed state expire), in bursts of 4 packets. When a packet from the other end arrives, the "hole" is used immediately (INIT or probe), towards that address and only towards IPs registered by it (a spoofed address does not trigger a 2 KB handshake to a third party). Between an `open`/`cone` node and anyone, continuous attempts as before are maintained.
 
-**Teste** (`test_nat_sim.py`, ca root pe Linux cu NAT-uri reale simulate: namespace-uri + nftables, 15 ms latență pe fiecare legătură):
-clasificarea pentru open, port-restricted (`masquerade`), symmetric (`masquerade random`), cone (SNAT/DNAT static) și UDP blocat;
-perechi de noduri: port-restricted ↔ port-restricted (cazul greu), port-restricted ↔ cone, symmetric ↔ cone, open ↔ symmetric
-se conectează direct, symmetric ↔ port-restricted merge pe relay imediat; aceleași cazuri între **clientul Rust** (compilat pentru Linux cu Zig)
-și nodul Python, în ambele ordini de roluri, plus Rust ↔ Rust. Fără latență (0,1 ms) două NAT-uri Linux se „otrăvesc” reciproc
-(artefact de laborator: pe internet latența separă pachetele), de aceea testul cere `tc netem`.
+**Tests** (`test_nat_sim.py`, as root on Linux with real simulated NATs: namespaces + nftables, 15 ms latency on each link):
+classification for open, port-restricted (`masquerade`), symmetric (`masquerade random`), cone (static SNAT/DNAT) and blocked UDP;
+node pairs: port-restricted ↔ port-restricted (hard case), port-restricted ↔ cone, symmetric ↔ cone, open ↔ symmetric
+connect directly, symmetric ↔ port-restricted goes to relay immediately; same cases between **the Rust client** (compiled for Linux with Zig)
+and the Python node, in both role orders, plus Rust ↔ Rust. Without latency (0.1 ms) two Linux NATs "poison" each other
+(lab artifact: on the internet latency separates packets), which is why the test requires `tc netem`.
 
-**Deschiderea automată a unui port pe router (PCP, NAT-PMP, UPnP).** Dacă NAT-ul nu e `open`, nodul cere routerului de acasă să
-redirecționeze portul UDP al nodului: întâi PCP (RFC 6887, UDP 5351 pe gateway), apoi NAT-PMP (RFC 6886), apoi UPnP IGD (descoperire SSDP,
-`AddPortMapping` prin SOAP; `oneqportmap.py` și `client/core/src/portmap.rs`, aceeași logică). Maparea se reînnoiește la jumătatea duratei și
-se șterge la oprire. Nodul **nu pretinde** că e deschis pe baza răspunsului routerului: cere relay-ului să sondeze adresa externă a mapării dintr-un
-port necontactat (`nat-test`) și abia dacă răspunsul vine publică `open` (cu `via: pcp|natpmp|upnp`); celelalte noduri încearcă atunci adresa direct,
-fără hole punching. Un răspuns UPnP se acceptă numai de la o adresă privată/link-local, cu `LOCATION` și URL-ul de control pe aceeași adresă (un
-răspuns falsificat nu poate trimite nodul spre un terț), cu corpuri limitate la 64 KB. Oprire: `--no-port-mapping` (`port_mapping = no` în `node.conf`).
+**Automatic port mapping on the router (PCP, NAT-PMP, UPnP).** If the NAT is not `open`, the node asks the home router to
+forward its UDP port: first PCP (RFC 6887, UDP 5351 on the gateway), then NAT-PMP (RFC 6886), then UPnP IGD (SSDP discovery,
+`AddPortMapping` via SOAP; `oneqportmap.py` and `client/core/src/portmap.rs`, same logic). The mapping is renewed at half its lifetime and
+deleted on shutdown. The node **does not claim** to be open based on the router's response: it asks the relay to probe the mapping's external address from an
+uncontacted port (`nat-test`) and only if the response arrives does it publish `open` (with `via: pcp|natpmp|upnp`); other nodes then try the address directly,
+without hole punching. A UPnP response is accepted only from a private/link-local address, with `LOCATION` and the control URL on the same address (a
+spoofed response cannot redirect the node to a third party), with bodies limited to 64 KB. Disable: `--no-port-mapping` (`port_mapping = no` in `node.conf`).
 
-**Al doilea NAT (CGNAT, un router în spatele altui router).** Nodul se consideră în spatele a două NAT-uri dacă adresa văzută de relay e în
-100.64.0.0/10 (RFC 6598) sau dacă routerul își raportează (NAT-PMP/PCP/UPnP) altă adresă WAN decât cea văzută de relay. O mapare pe primul router
-ar fi inutilă (se șterge), nodul publică `cgnat: true`, iar perechea merge **imediat pe relay**, în afară de cazul în care celălalt capăt e `open`. Dacă
-routerul nu răspunde la niciun protocol, se vede doar cazul 100.64.0.0/10; un CGNAT cu adrese publice nu poate fi recunoscut așa.
+**Double NAT (CGNAT, a router behind another router).** A node is considered behind two NATs if the address seen by the relay is in
+100.64.0.0/10 (RFC 6598) or if the router reports (NAT-PMP/PCP/UPnP) a different WAN address than the one seen by the relay. A mapping on the first router
+would be useless (deleted), the node publishes `cgnat: true`, and the pair goes **immediately to relay**, unless the other side is `open`. If
+the router does not respond to any protocol, only the 100.64.0.0/10 case is detectable; a CGNAT with public addresses cannot be recognized this way.
 
-**Predicția de porturi (NAT simetric).** Pentru un NAT simetric nodul face o a treia tranzacție STUN, către portul „change” al relay-ului (anunțat ca
-`stun.change_port`): trei mapări consecutive cu pas constant (`delta`, 1..64, sau pași mici pozitivi) ⇒ alocare secvențială. Publică `delta` și cea mai nouă
-mapare; celălalt capăt trimite PUNCH și către `port + delta·k`, k = 1..16, în rundele sincronizate. Astfel simetric ↔ port-restricted și
-simetric ↔ simetric (ambele cu `delta`) nu mai merg obligatoriu pe relay. Metoda ghicește: dacă NAT-ul a servit alte fluxuri între măsurare și
-punching, ținta poate fi ratată (fereastra de 16 porturi acoperă o parte); nu ajută la NAT-uri cu porturi aleatoare, care rămân pe relay.
+**Port prediction (symmetric NAT).** For a symmetric NAT the node performs a third STUN transaction, towards the "change" port of the relay (announced as
+`stun.change_port`): three consecutive mappings with a constant step (`delta`, 1..64, or small positive steps) ⇒ sequential allocation. It publishes `delta` and the most recent
+mapping; the other side sends PUNCH also to `port + delta·k`, k = 1..16, in synchronized rounds. This way symmetric ↔ port-restricted and
+symmetric ↔ symmetric (both with `delta`) no longer need to go to relay. The method guesses: if the NAT has served other flows between measurement and
+punching, the target may be missed (the 16-port window covers part of the range); it does not help with random-port NATs, which stay on relay.
 
-**IPv6.** Socketul de date al nodului e dual-stack (`::` cu `IPV6_V6ONLY` oprit; înapoi la IPv4 dacă sistemul nu poate). O adresă IPv6 globală
-(2000::/3, aleasă de sistem pentru internet, fără să se trimită vreun pachet) se publică ca `[adresa]:port`, iar candidații IPv6 ai celorlalți se
-încearcă la fel ca cei IPv4. Două noduri cu IPv6 global nu trec prin regulile NAT (nu există traducere, doar un firewall cu stare) și nu cad pe relay din
-motive de NAT. `--no-ipv6` (`ipv6 = no`) le oprește.
+**IPv6.** The node's data socket is dual-stack (`::` with `IPV6_V6ONLY` off; falls back to IPv4 if the system cannot). A global IPv6 address
+(2000::/3, chosen by the system for internet, without sending any packet) is published as `[address]:port`, and the IPv6 candidates of others are
+tried the same way as IPv4. Two nodes with global IPv6 do not go through NAT rules (no translation, only a stateful firewall) and do not fall back to relay for
+NAT reasons. `--no-ipv6` (`ipv6 = no`) disables it.
 
-`oneqnode nat-check` arată și pasul alocării de porturi și dacă există un al doilea NAT. Un `--advertise` verificat de relay: dacă nu răspunde la
-sondă, nodul scrie un avertisment.
+`oneqnode nat-check` also shows the port allocation step and whether there is a second NAT. An `--advertise` verified by the relay: if it does not respond to
+the probe, the node writes a warning.
 
 
-# Modul 2: punct-la-punct (oneqtunel)
+# Mode 2: point-to-point (oneqtunel)
 
-Proiect educațional, **fără audit criptografic independent**.
+Educational project, **without an independent cryptographic audit**.
 
-- **Handshake:** X25519 + ML-KEM-768 (secretul ML-KEM înaintea celui X25519 în fiecare KDF), 2 mesaje:
-  `INIT` 2329 B, `RESP` 2225 B, fragmentate la nivel de aplicație (≤ 1200 B/datagramă).
-- **Date:** ChaCha20-Poly1305, contor pe 64 de biți, fereastră anti-replay de 1024. Rekey la 120 s, respingere la 180 s, keepalive la 25 s.
-- **Descoperire:** API HTTPS de întâlnire (`rendezvous_server.py`), TLS 1.3 **doar** X25519MLKEM768, fără fallback.
-- **Relay:** dacă după ~10 s nu există sesiune directă, datagramele merg opace printr-un WebSocket (`wss://…/v1/relay`). Tunelul revine singur pe calea directă (probă la 20 s).
-- `LABEL`: `tunsec-pq/v1 …` (constanta de fir a modului punct-la-punct). Orice schimbare de protocol primește o versiune nouă.
+- **Handshake:** X25519 + ML-KEM-768 (ML-KEM secret before X25519 in each KDF), 2 messages:
+  `INIT` 2329 B, `RESP` 2225 B, fragmented at the application level (≤ 1200 B/datagram).
+- **Data:** ChaCha20-Poly1305, 64-bit counter, 1024-packet anti-replay window. Rekey at 120 s, rejection at 180 s, keepalive at 25 s.
+- **Discovery:** HTTPS rendezvous API (`rendezvous_server.py`), TLS 1.3 **only** X25519MLKEM768, no fallback.
+- **Relay:** if after ~10 s there is no direct session, datagrams go opaque through a WebSocket (`wss://…/v1/relay`). The tunnel reverts automatically to the direct path (probe every 20 s).
+- `LABEL`: `tunsec-pq/v1 …` (the wire constant of the point-to-point mode). Any protocol change gets a new version.
 
-## Cerințe
+## Requirements
 
-Python legat de **OpenSSL ≥ 3.5** (`python3 -c "import ssl; print(ssl.OPENSSL_VERSION)"`), `/dev/net/tun`, `ip`.
+Python linked against **OpenSSL ≥ 3.5** (`python3 -c "import ssl; print(ssl.OPENSSL_VERSION)"`), `/dev/net/tun`, `ip`.
 
 ```sh
 python3 -m venv /opt/oneq-src/venv && /opt/oneq-src/venv/bin/pip install -r requirements.txt
 /opt/oneq-src/venv/bin/python -c "from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey"
 ```
 
-## Chei și schimbul cheilor publice
+## Keys and public key exchange
 
 ```sh
-oneqtunel.py genkey --key A.key          # scrie A.key (0600) și A.key.pub (1216 B, base64); afișează node_id
+oneqtunel.py genkey --key A.key          # writes A.key (0600) and A.key.pub (1216 B, base64); prints node_id
 ```
 
-Schimbi **fișierele `.pub`** între cele două noduri printr-un canal de încredere. Serverul de întâlnire nu e de încredere pentru identitate, pentru că handshake-ul autentifică nodurile după cheile statice. `node_id = SHA-256(cheie publică)[:16]`. Nodul cu cheia publică mai mică e inițiatorul.
+Exchange the **`.pub` files** between the two nodes over a trusted channel. The rendezvous server is not trusted for identity, because the handshake authenticates nodes by their static keys. `node_id = SHA-256(public key)[:16]`. The node with the smaller public key is the initiator.
 
-## Token și server
+## Token and server
 
 ```sh
-python3 -c "import secrets;print(secrets.token_urlsafe(32))" > net.token && chmod 600 net.token   # același pe ambele noduri
-python3 rendezvous_server.py hash-token < net.token >> /etc/oneq-p2p/tokens.sha256                   # serverul ține doar hash-ul
+python3 -c "import secrets;print(secrets.token_urlsafe(32))" > net.token && chmod 600 net.token   # same on both nodes
+python3 rendezvous_server.py hash-token < net.token >> /etc/oneq-p2p/tokens.sha256                   # server only stores the hash
 ```
 
-Server cu TLS direct (certificat propriu sau Let's Encrypt):
+Server with direct TLS (self-signed certificate or Let's Encrypt):
 
 ```sh
 rendezvous_server.py run --listen 0.0.0.0:8443 --cert fullchain.pem --key privkey.pem --tokens-file tokens.sha256
 ```
 
-În producție e recomandat în spatele nginx/Caddy (`deploy/`), cu serverul pe `127.0.0.1:8080 --insecure-http --trust-proxy`.
+In production, recommended behind nginx/Caddy (`deploy/`), with the server on `127.0.0.1:8080 --insecure-http --trust-proxy`.
 
-## Pornirea unui nod
+## Starting a node
 
 ```sh
-# token din fișier (0600) sau din mediu (TUNSEC_TOKEN). Niciodată din linia de comandă.
+# token from file (0600) or from environment (TUNSEC_TOKEN). Never from the command line.
 oneqtunel.py run --key A.key --peer B.key.pub --ifname pq0 --addr 10.99.0.1/24 \
    --listen 0.0.0.0:51820 --advertise 203.0.113.5:51820 \
    --rendezvous https://rv.example.org --token-file net.token [--cafile ca.pem] [--stun host:3478]
 ```
 
-Necesită `CAP_NET_ADMIN` (sau un TUN persistent: `ip tuntap add dev pq0 mode tun user oneq-p2p`, apoi `--no-config`, caz în care nodul nu mai are nevoie de privilegii).
-Fără rendezvous (test sau IP-uri fixe): `--peer-endpoint IP:PORT`. Relay: `--force-relay`, `--no-relay`, `--relay-after SEC`.
+Requires `CAP_NET_ADMIN` (or a persistent TUN: `ip tuntap add dev pq0 mode tun user oneq-p2p`, then `--no-config`, in which case the node no longer needs privileges).
+Without rendezvous (test or fixed IPs): `--peer-endpoint IP:PORT`. Relay: `--force-relay`, `--no-relay`, `--relay-after SEC`.
 
-## Legarea la o interfață (`--via`)
+## Interface binding (`--via`)
 
-`--via IFACE` leagă socketul UDP la adresa interfeței IFACE (de exemplu a unui alt tunel existent). Adresa ei e anunțată ca un candidat în plus. Interfața e **ținută de procesul care a creat-o și nu poate fi partajată**: tunelul își creează **propria** interfață TUN (`--ifname pq0`), iar traficul circulă încapsulat prin cealaltă interfață. MTU-ul implicit în acest caz este **1220** (1380 altfel). Se poate suprascrie cu `--mtu`.
+`--via IFACE` binds the UDP socket to the address of interface IFACE (e.g. of another existing tunnel). Its address is announced as an additional candidate. The interface is **owned by the process that created it and cannot be shared**: the tunnel creates its **own** TUN interface (`--ifname pq0`), and traffic flows encapsulated through the other interface. The default MTU in this case is **1220** (1380 otherwise). Can be overridden with `--mtu`.
 
-## Verificarea TLS post-cuantic
+## Post-quantum TLS verification
 
-Cu un `openssl` ≥ 3.5:
+With an `openssl` ≥ 3.5:
 
 ```sh
-openssl s_client -connect rv.example.org:443 -tls1_3 -groups X25519MLKEM768 -brief </dev/null   # trebuie: "Negotiated TLS1.3 group: X25519MLKEM768"
-openssl s_client -connect rv.example.org:443 -tls1_3 -groups X25519          -brief </dev/null   # trebuie să eșueze (handshake_failure)
+openssl s_client -connect rv.example.org:443 -tls1_3 -groups X25519MLKEM768 -brief </dev/null   # expected: "Negotiated TLS1.3 group: X25519MLKEM768"
+openssl s_client -connect rv.example.org:443 -tls1_3 -groups X25519          -brief </dev/null   # expected to fail (handshake_failure)
 ```
 
-**Mecanismul:** Python 3.13 nu are `SSLContext.set_groups`, așa că `pqtls.py` setează `OPENSSL_CONF=pq_openssl.cnf` (TLS 1.3, `Groups = X25519MLKEM768`) *înainte* de `import ssl`. Fișierul se încarcă doar în procesele noastre, nu și în restul sistemului. Clientul (`Rendezvous`, `RelayClient`) refuză orice server care nu oferă acest grup. Pe proxy, restricția se impune cu `ssl_ecdh_curve X25519MLKEM768` (nginx) sau `curves x25519mlkem768` (Caddy).
+**Mechanism:** Python 3.13 does not have `SSLContext.set_groups`, so `pqtls.py` sets `OPENSSL_CONF=pq_openssl.cnf` (TLS 1.3, `Groups = X25519MLKEM768`) *before* `import ssl`. The file is loaded only in our processes, not in the rest of the system. The client (`Rendezvous`, `RelayClient`) rejects any server that does not offer this group. On a proxy, the restriction is enforced with `ssl_ecdh_curve X25519MLKEM768` (nginx) or `curves x25519mlkem768` (Caddy).
 
-## Producție
+## Production
 
-`deploy/`: `oneq-p2p@.service` (utilizator `oneq-p2p`, `CAP_NET_ADMIN` doar aici, cheia și tokenul prin `LoadCredential`), `oneq-p2p-rendezvous.service` (fără capabilități), `nginx-rendezvous.conf`, `Caddyfile`, `node.env.example`.
+`deploy/`: `oneq-p2p@.service` (user `oneq-p2p`, `CAP_NET_ADMIN` only here, key and token via `LoadCredential`), `oneq-p2p-rendezvous.service` (no capabilities), `nginx-rendezvous.conf`, `Caddyfile`, `node.env.example`.
 
 ```sh
 useradd --system --no-create-home --shell /usr/sbin/nologin oneq-p2p;  useradd --system ... oneq-p2p-rv
 install -m600 A.key /etc/oneq-p2p/NAME.key;  install -m600 net.token /etc/oneq-p2p/NAME.token
-cp deploy/node.env.example /etc/oneq-p2p/NAME.env && chmod 600 /etc/oneq-p2p/NAME.env   # editezi ONEQ_P2P_ARGS
+cp deploy/node.env.example /etc/oneq-p2p/NAME.env && chmod 600 /etc/oneq-p2p/NAME.env   # edit ONEQ_P2P_ARGS
 systemctl enable --now oneq-p2p@NAME
 ```
 
-## Teste
+## Tests
 
 ```sh
-python3 test_oneqtunel.py        # unitare + TLS (openssl s_client) + API + relay + fragmentare, fără root
-python3 test_nginx_proxy.py      # nginx real (OpenSSL ≥ 3.5) în fața serverului
-sudo python3 test_e2e.py         # 2 TUN reale în namespace-uri: direct, relay forțat, fallback + revenire; fără text în clar pe fir
+python3 test_oneqtunel.py        # unit + TLS (openssl s_client) + API + relay + fragmentation, no root
+python3 test_nginx_proxy.py      # real nginx (OpenSSL ≥ 3.5) in front of the server
+sudo python3 test_e2e.py         # 2 real TUNs in namespaces: direct, forced relay, fallback + recovery; no plaintext on the wire
 ```
 
-## Depanare
+## Troubleshooting
 
-| Simptom | Cauză probabilă |
+| Symptom | Likely cause |
 |---|---|
-| `handshake failure` către rendezvous | serverul/proxy-ul nu oferă X25519MLKEM768 (OpenSSL < 3.5) |
-| `pqtls must be imported before ssl` | un modul importă `ssl` înainte de `pqtls` |
-| `cannot import mlkem` | `cryptography` prea vechi (cere ≥ 50.0.2 testat) |
-| fără sesiune, fără relay | token greșit (401), ceasuri decalate > 180 s (INIT respins), UDP blocat și `--no-relay` |
-| sesiune doar prin relay | NAT simetric sau firewall; verifică `--advertise` și porturile UDP |
-| `private key must not be accessible…` | `chmod 600` pe cheie/token |
-| TUN: `Operation not permitted` | lipsește `CAP_NET_ADMIN` (sau TUN persistent cu `--no-config`) |
-| MTU/pierderi cu `--via` (încapsulare în alt tunel) | folosește `--mtu 1220` sau mai mic |
+| `handshake failure` towards rendezvous | server/proxy does not offer X25519MLKEM768 (OpenSSL < 3.5) |
+| `pqtls must be imported before ssl` | a module imports `ssl` before `pqtls` |
+| `cannot import mlkem` | `cryptography` too old (requires ≥ 50.0.2 tested) |
+| no session, no relay | wrong token (401), clocks drifted > 180 s (INIT rejected), UDP blocked and `--no-relay` |
+| session through relay only | symmetric NAT or firewall; check `--advertise` and UDP ports |
+| `private key must not be accessible…` | `chmod 600` on key/token |
+| TUN: `Operation not permitted` | missing `CAP_NET_ADMIN` (or persistent TUN with `--no-config`) |
+| MTU/loss with `--via` (encapsulation in another tunnel) | use `--mtu 1220` or smaller |
 
-## Limite cunoscute
+## Known limitations
 
-- **Dovada de posesie a cheii nodului** (vezi secțiunea de mai jos, [POP.md](POP.md) în engleză): rezolvă ocuparea unui `node_id` de către un deținător de token/cont care
-  nu are cheia privată. Nu apără de un relay compromis (care poate șterge un nod și aloca adresa lui altei chei) și nici de un deținător al contului care are și cheia. Fără
-  `--require-pop`, un nod care nu dă dovadă este acceptat și poate fi ocupat.
-- Un singur peer per nod (modul punct-la-punct); pentru mai mulți peeri se folosește modul mesh.
-- Predicția de porturi ghicește (vezi „Noduri în spatele NAT”); un NAT cu porturi aleatoare, un CGNAT cu adrese publice și un NAT simetric fără pas constant rămân pe relay.
+- **Node key proof of possession** (see section above, [POP.md](POP.md) in English): prevents a token/account holder who does not have the private key from claiming a `node_id`.
+  Does not protect against a compromised relay (which can delete a node and allocate its address to another key) or against an account holder who also has the key. Without
+  `--require-pop`, a node that does not provide proof is accepted and its slot can be taken.
+- One peer per node (point-to-point mode); for multiple peers use the mesh mode.
+- Port prediction guesses (see "Nodes behind NAT"); a NAT with random ports, a CGNAT with public addresses and a symmetric NAT without a constant step stay on relay.
 
 ## Update check
 
