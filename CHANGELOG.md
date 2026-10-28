@@ -5,6 +5,21 @@ Compatibility rules are listed per release.
 
 ## Unreleased
 
+* **Performance: PQ handshake crypto off the event loop.** The X25519+ML-KEM-768 operations in `init_create`,
+  `init_consume`+`resp_create` and `resp_consume` now run in a thread-pool executor instead of blocking the asyncio
+  event loop. The handshake retry interval was raised from 2 s to 5 s and the maintenance tick from 250 ms to 500 ms.
+  A per-peer `init_pending` flag prevents duplicate concurrent handshake tasks. Together these changes cut CPU usage
+  significantly on busy nodes (12+ peers, frequent session re-establishment).
+* **Performance telemetry.** The Python node emits structured JSON-line events to the `oneq.perf` logger
+  (`crypto_init_create`, `crypto_init_resp`, `crypto_resp_consume` with duration in ms; `session_up` with path and
+  round-trip time; `path_change`; `tick_slow`), batched and uploaded every 60 s to the relay. The relay stores them
+  in `perf-{community}.jsonl`. New endpoints: `POST /v1/c/{comm}/perf` (authenticated, ingest) and
+  `GET /v1/bench` (unauthenticated, serve the bench harness script).
+* **`oneq_bench.py`: 48-hour randomised test harness.** A standalone script that self-updates from the relay
+  (`GET /v1/bench`), schedules test functions at randomised intervals, and uploads results via `POST /v1/c/{comm}/perf`.
+  Built-in tests: relay health (`ping_relay`) and member-list latency (`list_nodes`); stubs for session latency,
+  local crypto benchmark and throughput burst (to be filled in).
+
 * **Redundant gateways**: the same network can be announced through up to 4 gateway nodes (`oneqrelay admin route-add COMMUNITY NETWORK NODE --prio N`, lower is preferred, default 100; `route-del COMMUNITY NETWORK [NODE]`;
   `PUT {via, prio}` and `DELETE ...?via=` in the API; the admin page lists one line per gateway with its priority). The record key now carries the gateway (`<comm>/<network>_<prefix>/<node id>`); records of the earlier
   shape are still read and are rewritten when the same gateway is announced again. The client uses the best gateway **that answers** (session up and a packet from it within 45 s, not the registry's 90 s presence), stays on it
