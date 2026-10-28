@@ -41,6 +41,8 @@ struct FfiConfig {
     no_ipv6: bool,
     #[serde(default)]
     accept_routes: bool,
+    #[serde(default)]
+    exit_node: Option<String>,
     /// check GitHub for new releases (default true)
     #[serde(default = "yes")]
     update_check: bool,
@@ -119,6 +121,7 @@ pub extern "C" fn oneq_prepare(config_json: *const c_char) -> c_int {
         no_port_mapping: c.no_port_mapping,
         no_ipv6: c.no_ipv6,
         accept_routes: c.accept_routes,
+        exit_node: c.exit_node.clone(),
         no_update_check: !c.update_check,
     };
     let update_check = c.update_check;

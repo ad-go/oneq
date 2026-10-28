@@ -673,6 +673,15 @@ class Registry:
             out.append({"cidr": v["cidr"], "via": v["via"], "by": v.get("by", ""), "prio": v.get("prio", ROUTE_DEFAULT_PRIO)})
         return sorted(out, key=lambda r: (ipaddress.ip_network(r["cidr"]).network_address, r["cidr"], r["prio"], r["via"]))
 
+    def set_exit_node(self, comm: str, nid_hex: str, enabled: bool, by: str):
+        """Mark (or unmark) a node as an exit node: members may route their default internet traffic through it."""
+        with self.s.lock:
+            key = f"{comm}/{nid_hex}"
+            n = self.s.get("node", key)
+            if n is None:
+                raise RegistryError("unknown node", 404)
+            self.s.put("node", key, dict(n, exit_node=enabled, exit_node_by=by if enabled else ""))
+
     def members(self, comm: str) -> list:
         out = []
         grants = self.relay_grants(comm)
@@ -683,7 +692,8 @@ class Registry:
                         "owner": v["owner"], "endpoints": (p or {}).get("endpoints", []), "online": p is not None,
                         "nat": (p or {}).get("nat"), "offer": bool(v.get("offer")),
                         "relay_role": {"max_kbps": g["max_kbps"], "exp": g.get("exp", 0)} if g else None,
-                        "relays": (p or {}).get("rl", [])})
+                        "relays": (p or {}).get("rl", []),
+                        "exit_node": bool(v.get("exit_node"))})
         return out
 
     def fix_ip_conflicts(self, comm: str, grace_s: float = 30.0) -> int:

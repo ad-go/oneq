@@ -17,7 +17,7 @@ exe, ext, url, title = sys.argv[1], os.path.abspath(sys.argv[2]), sys.argv[3], s
 member = sys.argv[5] if len(sys.argv) > 5 else None
 profile = tempfile.mkdtemp(prefix="oneq-ffx-")
 UUID = "7c1d0b52-3e1a-4a53-9f0a-5b6d1f2e8a11"       # fixed, so the popup's address is known
-GECKO_ID = "k@1q.ro"
+GECKO_ID = "k@example.com"
 PORT = 2828
 
 

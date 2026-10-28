@@ -34,6 +34,7 @@ options for `up`:
   --no-port-mapping     do not ask the router (PCP, NAT-PMP, UPnP) to forward our UDP port
   --no-ipv6             IPv4 only (no dual-stack socket, no IPv6 candidates)
   --accept-routes       use the private networks the administrator routed through a gateway member (routes are installed on the TUN interface; off by default)
+  --exit-node NAME      route all internet traffic through the named node (the administrator must have marked it as an exit node)
   --no-update-check     do not check GitHub for a newer release (default: check at start and every 24 h; nothing is installed automatically)
   --force-relay         send everything through the relay
   --no-relay            direct UDP only
@@ -46,7 +47,7 @@ options for `up`:
 `service install` takes the same options as `up` (password from --password-file or ONEQ_PASSWORD): it writes the
 configuration, the password file (administrators/SYSTEM only) and the CA into the service directory
 (Windows: %ProgramData%\\oneq, macOS: /Library/Application Support/oneq), copies the interactive key if there is one
-(same address as before) and registers the service (Windows service oneq / launchd daemon ro.1q.oneq).
+(same address as before) and registers the service (Windows service oneq / launchd daemon ro.example.oneq).
 
 Needs administrator/root rights to create the network interface.
 ";
@@ -101,6 +102,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args> {
             "--no-port-mapping" => cfg.no_port_mapping = true,
             "--no-ipv6" => cfg.no_ipv6 = true,
             "--accept-routes" => cfg.accept_routes = true,
+            "--exit-node" => cfg.exit_node = Some(val("--exit-node")?),
             "--no-update-check" => cfg.no_update_check = true,
             "--relay-after" => cfg.relay_after_s = val("--relay-after")?.parse()?,
             "--ifname" => ifname = val("--ifname")?,
@@ -243,7 +245,7 @@ async fn main() -> Result<()> {
 const RELAY_HELP: &str = "oneqclient relay: the oneq relay (federated registry, relay and STUN service) runs on this machine from the bundled Python.
   relay init --name HOST [--ip ADDR ...] [--port 8443] [--id NAME] [--no-admin]    one-time setup in the data directory: private CA and
                                                                                    certificate, secrets, admin password + authenticator, relay.conf
-  relay install [--no-autostart] [--no-start] [--no-firewall]    register the background service (Windows service oneqrelay / launchd ro.1q.oneqrelay)
+  relay install [--no-autostart] [--no-start] [--no-firewall]    register the background service (Windows service oneqrelay / launchd ro.example.oneqrelay)
                                                                  and open TCP PORT and UDP PORT..PORT+2 in the firewall (Windows)
   relay start|stop|restart|status|uninstall                      control the service (uninstall also closes the firewall ports; data is kept)
   --user                                                         macOS: no administrator rights: a LaunchAgent of this user (runs while logged in), data in ~/.config/oneq/relay

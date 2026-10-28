@@ -1,49 +1,48 @@
-oneqnode on Debian
-==================
+oneqnode pe Debian
+=================
 
-The package installs the oneqnode node in /opt/oneq/node, either as a systemd template service (oneqnode@NAME) or as a
-supervisord program (oneqnode-NAME), whichever you choose. It runs as the dedicated user "oneqnode" with only
-CAP_NET_ADMIN (for the TAP interface); both paths start the same script, /opt/oneq/node/bin/run NAME. The Python libraries
-are bundled. The commands oneqnode and oneqnode-init are in PATH (links to /opt/oneq/node/bin).
+Pachetul instaleaza nodul oneqnode in /opt/oneq/node, ca serviciu systemd sablon (oneqnode@NUME) sau ca program
+supervisord (oneqnode-NUME), la alegere. Ruleaza ca utilizatorul dedicat "oneqnode", doar cu CAP_NET_ADMIN (pentru
+interfata TAP); ambele cai pornesc acelasi script, /opt/oneq/node/bin/run NUME. Bibliotecile Python sunt incluse.
+Comenzile oneqnode si oneqnode-init sunt in PATH (legaturi catre /opt/oneq/node/bin).
 
-Requirements: Debian 13 (Python 3.13, OpenSSL >= 3.5), iproute2, /dev/net/tun.
+Cerinte: Debian 13 (Python 3.13, OpenSSL >= 3.5), iproute2, /dev/net/tun.
 
-Configuration: /etc/oneq/node.conf
-----------------------------------
-An INI file (comments with # or ;) read by the application: the [defaults] section applies to all nodes, and every node has
-its own section, [NAME]. Command-line options override it; a misspelled option stops the node with a clear message. After a
-change:
+Configurare: /etc/oneq/node.conf
+-------------------------------
+Un fisier INI (comentarii cu # sau ;), citit de aplicatie: sectiunea [defaults] se aplica tuturor nodurilor, iar
+fiecare nod are sectiunea lui, [NUME]. Optiunile din linia de comanda il suprascriu; o optiune scrisa gresit opreste
+nodul cu un mesaj clar. Dupa o modificare:
 
-  sudo systemctl restart oneqnode@NAME     or     sudo supervisorctl restart oneqnode-NAME
+  sudo systemctl restart oneqnode@NUME     sau     sudo supervisorctl restart oneqnode-NUME
 
-Options: relays, community, user, label, key_file, password_file, ifname, listen, advertise, stun, cafile, via,
-force_relay, no_relay, relay_after, configure_interface, init. Explanations and an example are in the file itself.
-Keys and passwords are NOT stored in this file: only the paths of their files (owner oneqnode, mode 0600).
+Optiuni: relays, community, user, label, key_file, password_file, ifname, listen, advertise, stun, cafile, via,
+force_relay, no_relay, relay_after, configure_interface, init. Explicatii si un exemplu sunt chiar in fisier.
+Cheile si parolele NU sunt in acest fisier: doar caile fisierelor lor (proprietar oneqnode, mod 0600).
 
-Setup and start
----------------
-The account (community, user, password) is created by the oneqrelay administrator. Then, on the node:
+Configurare si pornire
+----------------------
+Contul (comunitate, utilizator, parola) il creeaza administratorul oneqrelay. Apoi, pe nod:
 
-  sudo oneqnode-init lan --relay https://r1.example.org --relay https://r2.example.org \
+  sudo oneqnode-init lan --relay https://r1.exemplu.ro --relay https://r2.exemplu.ro \
        --community lan --user alice --advertise 203.0.113.5:51820
 
-The command generates the node key (/etc/oneq/node-lan.key), asks for the password (or --password-file FILE; it is kept in
-/etc/oneq/node-lan.password), writes the [lan] section in node.conf and starts the node. The service manager is chosen
-automatically: "init" from [defaults], otherwise systemd if it is PID 1, otherwise supervisord if installed; you can force
-it with --init systemd|supervisor|none. The interface is called oneq-lan; the IP and MAC addresses come automatically from
-oneqrelay:
+Comanda genereaza cheia nodului (/etc/oneq/node-lan.key), cere parola (sau --password-file FISIER; se pastreaza in
+/etc/oneq/node-lan.password), scrie sectiunea [lan] in node.conf si porneste nodul. Managerul se alege automat:
+"init" din [defaults], altfel systemd daca este PID 1, altfel supervisord daca este instalat; se poate forta cu
+--init systemd|supervisor|none. Interfata se numeste oneq-lan; adresa IP si MAC vin automat de la oneqrelay:
 
   ip addr show oneq-lan
   journalctl -u oneqnode@lan -f                 (systemd)
-  supervisorctl status oneqnode-lan             (supervisord; log in /var/log/oneq/node-lan.log)
+  supervisorctl status oneqnode-lan             (supervisord; jurnal in /var/log/oneq/node-lan.log)
 
---advertise: the address at which other nodes can reach this node (needed behind NAT or a firewall; without it the node
-uses the relay). Several --relay options mean automatic failover.
+--advertise: adresa la care alte noduri pot ajunge la acest nod (necesara in spatele NAT sau firewall;
+fara ea nodul foloseste relay-ul). Mai multe --relay inseamna failover automat.
 
-Bound to an existing interface: put "via = IFACE" in the node's section (the interface stays owned by the process that
-created it; oneqnode makes its own TAP).
+Legat la o interfata existenta: in sectiunea nodului pui "via = IFACE" (interfata ramane a procesului care a creat-o;
+oneqnode isi face propriul TAP).
 
-Stop/remove: sudo oneqnode-init lan --remove (stops the node and deletes the section, the key and the password).
-`apt purge oneqnode` deletes /etc/oneq/node.conf and the keys; `apt remove` stops the nodes but keeps the configuration.
+Oprire/stergere: sudo oneqnode-init lan --remove (opreste nodul si sterge sectiunea, cheia si parola).
+`apt purge oneqnode` sterge /etc/oneq/node.conf si cheile; `apt remove` opreste nodurile dar pastreaza configuratia.
 
-Educational project, without independent cryptographic audit.
+Proiect educational, fara audit criptografic independent.

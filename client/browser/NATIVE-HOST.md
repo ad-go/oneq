@@ -17,7 +17,7 @@ extension (options form, popup)              oneqclient native-host             
    killed abruptly the proxy ends by itself (`oneqclient proxy --exit-with-pid HOSTPID` polls the host's process). The SOCKS5 port therefore exists only during the browser
    session. (The proxy still serves browsers only, see the main README.)
 3. **Registration** (`oneqclient native-host install`): a manifest for Chromium browsers (`allowed_origins`: the extension ids) and one for Firefox
-   (`allowed_extensions`: `k@1q.ro`); Windows: `HKCU\Software\<Browser>\NativeMessagingHosts\ro.1q.oneq` for Chrome, Brave, Edge, Chromium and Firefox; macOS and
+   (`allowed_extensions`: `k@example.com`); Windows: `HKCU\Software\<Browser>\NativeMessagingHosts\ro.example.oneq` for Chrome, Brave, Edge, Chromium and Firefox; macOS and
    Linux: the browsers' `NativeMessagingHosts` directories, only for browsers that are installed. `uninstall` removes them. No administrator rights, nothing outside the
    user's profile.
 4. **Stable extension id**: an unpacked extension's id depends on its path, so the development manifest carries a public `key` (id

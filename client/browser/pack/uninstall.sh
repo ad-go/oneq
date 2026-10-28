@@ -7,7 +7,7 @@ if [ "$OS" = Darwin ]; then DEST="$HOME/Library/Application Support/oneq/browser
 PURGE=0
 while [ $# -gt 0 ]; do case "$1" in --dest) DEST=$2; shift 2;; --purge) PURGE=1; shift;; *) echo "unknown option $1" >&2; exit 2;; esac; done
 if [ "$OS" = Darwin ]; then
-  PLIST="$HOME/Library/LaunchAgents/ro.1q.oneq.proxy.plist"
+  PLIST="$HOME/Library/LaunchAgents/ro.example.oneq.proxy.plist"
   if [ -f "$PLIST" ]; then launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true; rm -f "$PLIST"; echo "LaunchAgent removed"; fi
 else
   UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/oneq-proxy.service"

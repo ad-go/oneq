@@ -164,6 +164,8 @@ struct Peer {
     hole_until: Option<Instant>,
     /// delegated relay nodes this peer says it holds a session with
     attached: Vec<[u8; 16]>,
+    /// administrator marked this node as an exit node
+    exit_node: bool,
 }
 
 impl Peer {
@@ -239,6 +241,7 @@ impl Peer {
             hole_addr: None,
             hole_until: None,
             attached: m.relays.clone(),
+            exit_node: m.exit_node,
         }
     }
 }
@@ -968,6 +971,8 @@ impl Engine {
                         (_, Path::Direct) => "direct".into(),
                         (_, Path::Relay) => "relay".into(),
                     },
+                    exit_node: p.exit_node,
+                    public_ip: p.nat_mapped.as_deref().and_then(|m| m.split(':').next()).unwrap_or("").to_string(),
                 })
                 .collect();
             peers.sort_by(|a, b| a.ip.cmp(&b.ip));
@@ -1013,6 +1018,7 @@ impl Engine {
             p.nat_cgnat = m.nat_cgnat;
             p.predicted = nat::punch_ports(p.nat.as_deref(), p.nat_mapped.as_deref(), p.nat_delta);
             p.attached = m.relays.clone();
+            p.exit_node = m.exit_node;
             if let Some(k) = m.relay_kbps {
                 delegates.insert(m.id, k);
             }
@@ -1212,7 +1218,7 @@ mod tests {
     }
 
     fn member_of(n: &Node, name: &str) -> Member {
-        Member { id: n.id.node_id(), pub_key: n.id.pub_bytes.clone(), name: name.into(), ip: n.info.ip, mac: n.info.mac, endpoints: vec![n.addr.to_string()], online: true, nat: None, nat_mapped: None, nat_delta: None, nat_cgnat: false, offer: false, relay_kbps: None, relays: vec![] }
+        Member { id: n.id.node_id(), pub_key: n.id.pub_bytes.clone(), name: name.into(), ip: n.info.ip, mac: n.info.mac, endpoints: vec![n.addr.to_string()], online: true, nat: None, nat_mapped: None, nat_delta: None, nat_cgnat: false, offer: false, relay_kbps: None, relays: vec![], exit_node: false }
     }
 
     fn ip_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
@@ -1283,6 +1289,7 @@ mod tests {
             offer: false,
             relay_kbps: None,
             relays: vec![],
+            exit_node: false,
         }
     }
 

@@ -92,9 +92,12 @@ class AdminUI:
             web.post(a + "/c/{comm}/users", self.api(self.h_user_add)),
             web.put(a + "/c/{comm}/users/{user}", self.api(self.h_user_edit)),
             web.delete(a + "/c/{comm}/users/{user}", self.api(self.h_user_del)),
+            web.get(a + "/c/{comm}/users/{user}/settings", self.api(self.h_user_settings)),
             web.delete(a + "/c/{comm}/nodes/{nid}", self.api(self.h_node_del)),
             web.put(a + "/c/{comm}/nodes/{nid}/relay-role", self.api(self.h_relay_grant)),
             web.delete(a + "/c/{comm}/nodes/{nid}/relay-role", self.api(self.h_relay_revoke)),
+            web.put(a + "/c/{comm}/nodes/{nid}/exit-node", self.api(self.h_exit_node_set)),
+            web.delete(a + "/c/{comm}/nodes/{nid}/exit-node", self.api(self.h_exit_node_del)),
             web.post(a + "/federation/peers", self.api(self.h_peer_add)),
             web.delete(a + "/federation/peers", self.api(self.h_peer_del)),
             web.post(a + "/federation/sync", self.api(self.h_sync)),
@@ -348,6 +351,30 @@ class AdminUI:
         self.noted(comm)
         return web.json_response({"ok": True})
 
+    async def h_user_settings(self, request):
+        r = self.relay
+        comm, user = request.match_info["comm"], request.match_info["user"]
+        if r.reg.s.get("user", f"{comm}/{user}") is None:
+            raise web.HTTPNotFound(text="unknown user")
+        relays = list(dict.fromkeys([r.origin] + list(r.fed_peers)))
+        ca_pem = ""
+        if r.cafile:
+            try:
+                with open(r.cafile) as f:
+                    ca_pem = f.read().strip()
+            except OSError:
+                pass
+        routes = r.reg.routes(comm)
+        settings = {"format": "oneq-settings", "version": 1, "settings": {
+            "relays": relays, "community": comm, "user": user, "name": "",
+            "ca_pem": ca_pem, "force_relay": False, "auto_start": True,
+            "start_hidden": False, "accept_routes": bool(routes),
+        }}
+        filename = f"oneq-settings-{comm}-{user}.json"
+        body = json.dumps(settings, indent=2).encode()
+        return web.Response(body=body, content_type="application/json",
+                            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
     async def h_node_del(self, request):
         comm, nid = request.match_info["comm"], request.match_info["nid"]
         if not meshdb.NAME_RE.match(nid):
@@ -370,6 +397,29 @@ class AdminUI:
         if not meshdb.NAME_RE.match(nid):
             raise web.HTTPBadRequest(text="bad node id")
         self.relay.reg.revoke_relay(comm, nid)
+        self.noted(comm)
+        return web.json_response({"ok": True})
+
+    # ------------------------------------------------------------ exit nodes
+    async def h_exit_node_set(self, request):
+        comm, nid = request.match_info["comm"], request.match_info["nid"]
+        if not meshdb.NAME_RE.match(nid):
+            raise web.HTTPBadRequest(text="bad node id")
+        try:
+            self.relay.reg.set_exit_node(comm, nid, True, "admin-page")
+        except meshdb.RegistryError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        self.noted(comm)
+        return web.json_response({"ok": True})
+
+    async def h_exit_node_del(self, request):
+        comm, nid = request.match_info["comm"], request.match_info["nid"]
+        if not meshdb.NAME_RE.match(nid):
+            raise web.HTTPBadRequest(text="bad node id")
+        try:
+            self.relay.reg.set_exit_node(comm, nid, False, "admin-page")
+        except meshdb.RegistryError as e:
+            raise web.HTTPBadRequest(text=str(e))
         self.noted(comm)
         return web.json_response({"ok": True})
 

@@ -20,6 +20,8 @@ Client API (TLS 1.3, X25519MLKEM768 only; Bearer = session token from /v1/login)
   PUT    /v1/c/<comm>/routes/<a.b.c.d_len>  {via: node_id, prio?}  administrator: announce a network behind a gateway node (e.g. 192.168.16.0_24);
          the same network may have up to 4 gateways (redundancy), lower prio is preferred
   DELETE /v1/c/<comm>/routes/<a.b.c.d_len>[?via=node_id]  administrator: withdraw the route through every gateway, or through one
+  PUT    /v1/c/<comm>/exit-node/<node_id>  administrator: mark a node as an exit node (members may route internet traffic through it)
+  DELETE /v1/c/<comm>/exit-node/<node_id>  administrator: remove exit node mark
   GET    /v1/health
 Federation API (HMAC-authenticated with the shared federation secret, on top of TLS)
   POST /fed/v1/sync   pull changes since a cursor      POST /fed/v1/poke   "pull from me now"
@@ -396,6 +398,39 @@ class OneqRelay:
         self.poke_peers()
         return web.json_response({"removed": key})
 
+    # ------------------------------------------------------------ exit nodes
+    async def h_put_exit_node(self, request):
+        self.check_rate(request)
+        comm, nid = request.match_info["comm"], request.match_info["nid"]
+        c = self.claims(request, comm)
+        if c["r"] != "admin":
+            raise web.HTTPForbidden(text="administrator only")
+        if not HEX32.match(nid):
+            raise web.HTTPBadRequest(text="bad node id")
+        try:
+            self.reg.set_exit_node(comm, nid, True, c["u"])
+        except meshdb.RegistryError as e:
+            raise _http_error(e)
+        log.info("%s marked node %s of %s as exit node", c["u"], nid[:8], comm)
+        self.poke_peers()
+        return web.json_response({"exit_node": nid})
+
+    async def h_del_exit_node(self, request):
+        self.check_rate(request)
+        comm, nid = request.match_info["comm"], request.match_info["nid"]
+        c = self.claims(request, comm)
+        if c["r"] != "admin":
+            raise web.HTTPForbidden(text="administrator only")
+        if not HEX32.match(nid):
+            raise web.HTTPBadRequest(text="bad node id")
+        try:
+            self.reg.set_exit_node(comm, nid, False, c["u"])
+        except meshdb.RegistryError as e:
+            raise _http_error(e)
+        log.info("%s removed exit node mark from node %s of %s", c["u"], nid[:8], comm)
+        self.poke_peers()
+        return web.json_response({"removed": nid})
+
     @staticmethod
     def valid_nat(nat) -> Optional[dict]:
         if not isinstance(nat, dict) or nat.get("type") not in oneqnat.NAT_TYPES:
@@ -719,6 +754,8 @@ class OneqRelay:
             web.get("/v1/c/{comm}/routes", self.h_list_routes),
             web.put("/v1/c/{comm}/routes/{net}", self.h_put_route),
             web.delete("/v1/c/{comm}/routes/{net}", self.h_del_route),
+            web.put("/v1/c/{comm}/exit-node/{nid}", self.h_put_exit_node),
+            web.delete("/v1/c/{comm}/exit-node/{nid}", self.h_del_exit_node),
             web.post("/fed/v1/sync", self.h_fed_sync),
             web.post("/fed/v1/poke", self.h_fed_poke),
             web.get("/fed/v1/relay", self.h_fed_relay),
@@ -847,6 +884,14 @@ def admin(args) -> int:
             print(f"{rec['cidr']} is routed through node {nid[:8]} (priority {rec['prio']})")
         elif c == "route-del":
             reg.del_route(args.community, args.network, resolve_node(reg, args.community, args.node) if args.node else None)
+        elif c == "exit-node-set":
+            nid = resolve_node(reg, args.community, args.node)
+            reg.set_exit_node(args.community, nid, True, "admin-cli")
+            print(f"node {nid[:8]} is now an exit node of {args.community}")
+        elif c == "exit-node-del":
+            nid = resolve_node(reg, args.community, args.node)
+            reg.set_exit_node(args.community, nid, False, "admin-cli")
+            print(f"node {nid[:8]} is no longer an exit node of {args.community}")
         elif c == "list":
             for k, v, _, _ in reg.s.list("comm"):
                 print(f"community {k}  {v['subnet']}  mtu {v['mtu']}")
@@ -854,6 +899,8 @@ def admin(args) -> int:
                     print(f"  user {uk.split('/', 1)[1]:20} {uv['role']:6} {'DISABLED' if uv['disabled'] else ''}")
                 for m in reg.members(k):
                     flag = f" RELAY {m['relay_role']['max_kbps']} kbit/s" if m["relay_role"] else (" offers relay" if m["offer"] else "")
+                    if m.get("exit_node"):
+                        flag += " EXIT"
                     print(f"  node {m['id']} {m['ip']:15} {m['mac']}  {m['owner']:12} {'online' if m['online'] else '-'} {m['name']}{flag}")
                 for r in reg.routes(k):
                     print(f"  route {r['cidr']:18} via {r['via'][:8]} priority {r['prio']} ({r['by']})")
@@ -1013,6 +1060,8 @@ def main(argv=None):
     x.add_argument("community"); x.add_argument("network", help="e.g. 192.168.16.0/24"); x.add_argument("node", help="node id, a prefix of it (8+ hex digits) or its name")
     x.add_argument("--prio", type=int, default=meshdb.ROUTE_DEFAULT_PRIO, help="lower is preferred; add the same network through several nodes for redundancy (default 100)")
     x = asub.add_parser("route-del", help="withdraw a route (through every gateway, or only through NODE)"); x.add_argument("community"); x.add_argument("network"); x.add_argument("node", nargs="?")
+    x = asub.add_parser("exit-node-set", help="mark a node as an exit node (members may route internet traffic through it)"); x.add_argument("community"); x.add_argument("node")
+    x = asub.add_parser("exit-node-del", help="remove exit node mark from a node"); x.add_argument("community"); x.add_argument("node")
     asub.add_parser("list")
     args = p.parse_args(argv)
     if args.cmd == "gen-secret":

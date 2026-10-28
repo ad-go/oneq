@@ -6,6 +6,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'controller.dart';
+import 'core.dart';
 import 'settings_page.dart';
 import 'update_banner.dart';
 
@@ -127,6 +128,54 @@ class OneqApp extends StatelessWidget {
       );
 }
 
+class _ExitNodeSelector extends StatelessWidget {
+  final List<Peer> peers;
+  final String selected;
+  final ValueChanged<String> onChanged;
+
+  const _ExitNodeSelector({required this.peers, required this.selected, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final exitPeers = peers.where((p) => p.exitNode).toList();
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: RadioGroup<String>(
+        groupValue: selected,
+        onChanged: (v) => onChanged(v ?? ''),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            dense: true,
+            leading: const Radio<String>(value: ''),
+            title: const Text('No exit node'),
+            subtitle: const Text('Direct internet'),
+            onTap: () => onChanged(''),
+          ),
+          for (final p in exitPeers)
+            Opacity(
+              opacity: p.online ? 1.0 : 0.45,
+              child: AbsorbPointer(
+                absorbing: !p.online,
+                child: ListTile(
+                  dense: true,
+                  leading: Radio<String>(value: p.name),
+                  title: Text(p.name),
+                  subtitle: Text('${p.ip}${p.publicIp.isNotEmpty ? "  ·  ${p.publicIp}" : ""}'),
+                  trailing: Icon(
+                    p.session ? Icons.lock : Icons.lock_open,
+                    size: 16,
+                    color: p.session ? Colors.green : (p.online ? Colors.orange : Colors.grey),
+                  ),
+                  onTap: () => onChanged(p.name),
+                ),
+              ),
+            ),
+        ]),
+      ),
+    );
+  }
+}
+
 String fmtBytes(int b) {
   const u = ['B', 'KB', 'MB', 'GB'];
   var v = b.toDouble(), i = 0;
@@ -175,7 +224,14 @@ class _HomePageState extends State<HomePage> {
     final s = c.snap;
     final cs = Theme.of(context).colorScheme;
     final configured = c.settings.relayList.isNotEmpty && c.settings.community.isNotEmpty && c.settings.user.isNotEmpty;
-    return Scaffold(
+    return PopScope(
+      canPop: !Platform.isAndroid || !c.active,
+      onPopInvoked: (didPop) {
+        if (!didPop && Platform.isAndroid && c.active) {
+          OneqController.vpn.invokeMethod<void>('minimizeToBackground');
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(title: const Text('oneq'), actions: [
         if (c.active)
           Padding(
@@ -243,10 +299,17 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 8),
             Text('Members', style: Theme.of(context).textTheme.titleMedium),
+            if (s.peers.any((p) => p.exitNode))
+              _ExitNodeSelector(
+                peers: s.peers,
+                selected: c.settings.exitNode,
+                onChanged: (v) { setState(() => c.settings.exitNode = v); c.save(); },
+              ),
             for (final p in s.peers)
               ListTile(
                 dense: true,
-                leading: Icon(p.session ? Icons.lock : Icons.lock_open, color: p.session ? Colors.green : (p.online ? Colors.orange : Colors.grey)),
+                leading: Icon(p.session ? Icons.lock : Icons.lock_open,
+                    color: p.session ? Colors.green : (p.online ? Colors.orange : Colors.grey)),
                 title: Text(p.name),
                 subtitle: Text(p.ip),
                 trailing: Text(p.session ? p.path : (p.online ? 'connecting' : 'offline')),
@@ -260,6 +323,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ]),
+      ),
       ),
     );
   }

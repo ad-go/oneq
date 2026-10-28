@@ -93,6 +93,7 @@ class DesktopService {
       }
       if (s.forceRelay) args.add('--force-relay');
       if (s.acceptRoutes) args.add('--accept-routes');
+      if (s.exitNode.isNotEmpty) args.addAll(['--exit-node', s.exitNode]);
       if (!s.updateCheck) args.add('--no-update-check');
       if (!s.autoStart) args.add('--no-autostart');
       await elevated([

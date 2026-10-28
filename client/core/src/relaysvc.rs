@@ -1,6 +1,6 @@
 //! The oneq relay as an optional part of the desktop clients (Windows, macOS): the Python `oneqrelay` runs from a bundled interpreter
 //! (python-build-standalone, OpenSSL >= 3.5 as the post-quantum TLS needs) and is installed as a background service, like the node:
-//! Windows service `oneqrelay` (LocalSystem, restarted by the service manager) and launchd daemon `ro.1q.oneqrelay`.
+//! Windows service `oneqrelay` (LocalSystem, restarted by the service manager) and launchd daemon `ro.example.oneqrelay`.
 //!
 //! Layout: `<home>` (read-only program files, default `<dir of oneqclient>/relay`) holds `python/`, `site-packages/` and `relay/` (the
 //! relay's .py files); `<data>` (default `<service dir>/relay`) holds relay.conf, the certificates, secrets and the database, restricted
@@ -327,7 +327,7 @@ pub mod winsvc {
 pub mod launchd {
     use super::*;
 
-    pub const LABEL: &str = "ro.1q.oneqrelay";
+    pub const LABEL: &str = "ro.example.oneqrelay";
 
     fn uid() -> String {
         std::process::Command::new("id").arg("-u").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|_| "501".into())
@@ -336,9 +336,9 @@ pub mod launchd {
     /// `user`: a LaunchAgent of the logged-in user (no administrator rights; runs while the user is logged in) instead of a system LaunchDaemon.
     fn plist_path(user: bool) -> PathBuf {
         if user {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/LaunchAgents/ro.1q.oneqrelay.plist")
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/LaunchAgents/ro.example.oneqrelay.plist")
         } else {
-            PathBuf::from("/Library/LaunchDaemons/ro.1q.oneqrelay.plist")
+            PathBuf::from("/Library/LaunchDaemons/ro.example.oneqrelay.plist")
         }
     }
 

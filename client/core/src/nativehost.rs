@@ -1,6 +1,6 @@
 //! Native messaging host of the browser extension (`oneqclient native-host`): lets the extension alone set up and run the connection to the mesh.
 //!
-//! The browser starts this program when the extension calls `connectNative("ro.1q.oneq")` and talks to it over stdin/stdout (4-byte little-endian length, then JSON).
+//! The browser starts this program when the extension calls `connectNative("ro.example.oneq")` and talks to it over stdin/stdout (4-byte little-endian length, then JSON).
 //! The host keeps the connection settings of the extension (relays, community, user, device name, CA, password), starts `oneqclient proxy` as a child process with
 //! them and stops it when the browser goes away: the SOCKS5 port exists only while the browser session does. Only the extensions named in the host manifest
 //! (`allowed_origins` / `allowed_extensions`) can start it, which is enforced by the browser.
@@ -14,8 +14,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const HOST_NAME: &str = "ro.1q.oneq";
-pub const GECKO_ID: &str = "k@1q.ro";
+pub const HOST_NAME: &str = "ro.example.oneq";
+pub const GECKO_ID: &str = "k@example.com";
 /// Extension id of the builds that carry the development `key` in their manifest (the install packs, the unpacked folder).
 pub const DEV_EXTENSION_ID: &str = "bgmdbjhjoieanbojmbkjpcdmkmofikoo";
 const MAX_IN: usize = 1 << 20;
@@ -512,7 +512,7 @@ mod tests {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(is_launch(&a(&["chrome-extension://abc/"])));
         assert!(is_launch(&a(&["chrome-extension://abc/", "--parent-window=123"])));
-        assert!(is_launch(&a(&["C:\\x\\ro.1q.oneq.firefox.json", "k@1q.ro"])));
+        assert!(is_launch(&a(&["C:\\x\\ro.example.oneq.firefox.json", "k@example.com"])));
         for no in [vec![], vec!["proxy"], vec!["ui", "--no-open"], vec!["native-host"], vec!["x.json"]] {
             assert!(!is_launch(&a(&no)), "{no:?}");
         }
@@ -583,12 +583,12 @@ mod tests {
     fn the_host_manifests_name_only_the_allowed_extensions() {
         let exe = Path::new("/opt/oneq/oneqclient");
         let c = manifest(exe, false, &["abcdefghijklmnopabcdefghijklmnop".into()]);
-        assert_eq!(c["name"], "ro.1q.oneq");
+        assert_eq!(c["name"], "ro.example.oneq");
         assert_eq!(c["type"], "stdio");
         assert_eq!(c["allowed_origins"], json!(["chrome-extension://abcdefghijklmnopabcdefghijklmnop/"]));
         assert!(c.get("allowed_extensions").is_none());
         let f = manifest(exe, true, &[]);
-        assert_eq!(f["allowed_extensions"], json!(["k@1q.ro"]));
+        assert_eq!(f["allowed_extensions"], json!(["k@example.com"]));
         assert!(f.get("allowed_origins").is_none());
         assert!(!DEV_EXTENSION_ID.is_empty() && DEV_EXTENSION_ID.len() == 32 && DEV_EXTENSION_ID.chars().all(|c| ('a'..='p').contains(&c)));
     }

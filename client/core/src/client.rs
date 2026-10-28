@@ -8,11 +8,12 @@ use anyhow::{anyhow, Context, Result};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex, Notify};
 
-use crate::control::{Control, JoinInfo, LoginRefused};
+use crate::control::{Control, JoinInfo, LoginRefused, Member};
 use crate::engine::{engine_task, Engine, EngineCfg, Event, Io};
 use crate::l3::{mac_to_string, Route};
 use crate::nat::{self, NatInfo, Prober, Transact};
 use crate::portmap::{Mapping, PortMapper};
+use crate::routes_os::ExitKeeper;
 use crate::status::{RouteInfo, Status};
 use crate::tls;
 use crate::wire::Identity;
@@ -49,6 +50,8 @@ pub struct Config {
     pub accept_routes: bool,
     /// do not check GitHub for new releases (the check is on by default; it only informs, nothing is installed)
     pub no_update_check: bool,
+    /// name of the exit node to use (routes 0.0.0.0/1 and 128.0.0.0/1 through it; relay IPs get /32 exceptions via the original gateway)
+    pub exit_node: Option<String>,
 }
 
 pub struct Prepared {
@@ -243,25 +246,30 @@ pub async fn run(p: Prepared, tun: Arc<tun_rs::AsyncDevice>, status: Arc<Status>
             }
         }
     });
-    // networks routed through a gateway member (accept_routes): the operating system sends them to the TUN device
-    let keeper = p.cfg.accept_routes.then(|| {
+    // networks routed through a gateway member (accept_routes or exit_node): the operating system sends them to the TUN device
+    let ifname = tun_name(&tun);
+    let keeper = (p.cfg.accept_routes || p.cfg.exit_node.is_some()).then(|| {
         let k = crate::routes_os::Keeper::new();
-        let ifname = tun_name(&tun);
-        (k.clone(), ifname.clone(), tokio::spawn(k.follow(ifname, status.clone())))
+        (k.clone(), ifname.clone(), tokio::spawn(k.follow(ifname.clone(), status.clone())))
     });
-    let r = run_port(p, from_dev_rx, to_dev_tx, status, stop).await;
+    // exit node: /32 exception routes for relay IPs via the original default gateway (created here, cleaned here)
+    let exit_keeper: Option<Arc<ExitKeeper>> = p.cfg.exit_node.is_some().then(|| ExitKeeper::new());
+    let r = run_port(p, from_dev_rx, to_dev_tx, status, stop, exit_keeper.clone()).await;
     reader.abort();
     writer.abort();
     if let Some((k, ifname, task)) = keeper {
         task.abort();
         let _ = tokio::task::spawn_blocking(move || k.clear(&ifname)).await;
     }
+    if let Some(ek) = exit_keeper {
+        let _ = tokio::task::spawn_blocking(move || ek.clear()).await;
+    }
     r
 }
 
 /// The same node without any operating-system device: `from_stack` delivers the IP packets the local side sends into the mesh, `to_stack`
 /// takes the IP packets that arrive from it (a userspace TCP/IP stack sits on the other end: see netstack.rs, `oneqclient proxy`).
-pub async fn run_port(p: Prepared, mut from_stack: mpsc::Receiver<Vec<u8>>, to_stack: mpsc::Sender<Vec<u8>>, status: Arc<Status>, stop: Arc<Notify>) -> Result<()> {
+pub async fn run_port(p: Prepared, mut from_stack: mpsc::Receiver<Vec<u8>>, to_stack: mpsc::Sender<Vec<u8>>, status: Arc<Status>, stop: Arc<Notify>, exit_keeper: Option<Arc<ExitKeeper>>) -> Result<()> {
     let Prepared { info, identity, control, cfg } = p;
     let listen = if cfg.listen.is_empty() { "0.0.0.0:0" } else { cfg.listen.as_str() };
     let (udp, dual) = bind_udp(listen, !cfg.no_ipv6).await.with_context(|| format!("bind UDP {listen}"))?;
@@ -376,6 +384,7 @@ pub async fn run_port(p: Prepared, mut from_stack: mpsc::Receiver<Vec<u8>>, to_s
         register_now.clone(),
         rly_shared,
         v6_ep.clone(),
+        exit_keeper,
     )));
     tasks.push(tokio::spawn(nat_task(
         control.clone(),
@@ -423,6 +432,7 @@ async fn registry_loop(
     register_now: Arc<AtomicBool>,
     rly: Arc<std::sync::Mutex<crate::engine::RlyShared>>,
     v6_ep: Arc<std::sync::Mutex<Option<String>>>,
+    exit_keeper: Option<Arc<ExitKeeper>>,
 ) {
     let mut last_register = Instant::now();
     let mut last_members: Option<Instant> = None;
@@ -473,7 +483,45 @@ async fn registry_loop(
                         }
                     });
                     // networks behind a gateway member: used only when the user asked for it (accept_routes)
-                    let accepted: Vec<Route> = if cfg.accept_routes { routes.clone() } else { Vec::new() };
+                    let mut accepted: Vec<Route> = if cfg.accept_routes { routes.clone() } else { Vec::new() };
+                    // exit node: inject two /1 routes that together cover 0.0.0.0/0 without masking the mesh /8
+                    if let Some(exit_name) = &cfg.exit_node {
+                        if let Some(exit_member) = m.iter().find(|mm| &mm.name == exit_name && mm.online) {
+                            let exit_via = exit_member.id;
+                            for (net_str, prefix) in [("0.0.0.0", 1u8), ("128.0.0.0", 1u8)] {
+                                let net: std::net::Ipv4Addr = net_str.parse().unwrap();
+                                if !accepted.iter().any(|r| r.net == net && r.prefix == prefix) {
+                                    accepted.push(crate::l3::Route { net, prefix, via: exit_via, prio: 0 });
+                                }
+                            }
+                            // exception routes for relay host IPs so the control plane keeps working
+                            if let Some(ek) = &exit_keeper {
+                                let relay_hosts: Vec<String> = cfg.relays.iter().filter_map(|u| {
+                                    let h = u.trim_start_matches("https://").trim_start_matches("http://");
+                                    let host = h.split('/').next().unwrap_or("").split(':').next().unwrap_or("").to_string();
+                                    if host.is_empty() { None } else { Some(host) }
+                                }).collect();
+                                if let Some(gw) = crate::routes_os::default_gateway() {
+                                    let hosts: Vec<String> = relay_hosts.into_iter().flat_map(|h| {
+                                        use std::net::ToSocketAddrs;
+                                        (h.as_str(), 0u16).to_socket_addrs().ok()
+                                            .into_iter().flatten()
+                                            .filter(|a| a.is_ipv4())
+                                            .map(|a| a.ip().to_string())
+                                            .collect::<Vec<_>>()
+                                    }).collect();
+                                    let ek2 = ek.clone();
+                                    let _ = tokio::task::spawn_blocking(move || ek2.sync(&hosts, &gw)).await;
+                                } else {
+                                    status.note(format!("exit node {exit_name}: could not detect default gateway, relay exceptions skipped"));
+                                }
+                            }
+                        } else if let Some(ek) = &exit_keeper {
+                            // exit node is offline or not found: remove any installed exceptions
+                            let ek2 = ek.clone();
+                            let _ = tokio::task::spawn_blocking(move || ek2.sync(&[], "")).await;
+                        }
+                    }
                     let shown = route_infos(&accepted, &m);
                     let nets = route_nets(&accepted);
                     status.update(|s| {

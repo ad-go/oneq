@@ -11,6 +11,10 @@ pub struct PeerInfo {
     pub session: bool,
     /// "direct", "relay" or "-" when there is no session
     pub path: String,
+    /// administrator marked this node as an exit node
+    pub exit_node: bool,
+    /// public IP:port the node measured against the STUN service (its internet-facing address)
+    pub public_ip: String,
 }
 
 /// A network routed through a gateway member (accepted with `accept_routes`).

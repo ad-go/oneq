@@ -47,7 +47,7 @@ pub async fn run(cfg: Config, opts: ProxyOpts, status: Arc<Status>, stop: Arc<No
         let l = TcpListener::bind(addr).await.with_context(|| format!("bind the status page on {addr}"))?;
         tasks.push(tokio::spawn(status_server(l, status.clone(), opts.socks, subnet, opts.gate.clone())));
     }
-    let r = crate::run_port(prepared, to_mesh_rx, from_mesh_tx, status, stop).await;
+    let r = crate::run_port(prepared, to_mesh_rx, from_mesh_tx, status, stop, None).await;
     for t in tasks {
         t.abort();
     }

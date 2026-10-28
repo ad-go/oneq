@@ -45,6 +45,9 @@ pub struct ServiceConfig {
     pub no_ipv6: bool,
     #[serde(default)]
     pub accept_routes: bool,
+    /// name of the node to use as an exit node (routes all internet traffic through it)
+    #[serde(default)]
+    pub exit_node: Option<String>,
     /// check for new releases (default yes)
     #[serde(default = "yes")]
     pub update_check: bool,
@@ -115,6 +118,7 @@ impl ServiceConfig {
             no_port_mapping: self.no_port_mapping,
             no_ipv6: self.no_ipv6,
             accept_routes: self.accept_routes,
+            exit_node: self.exit_node.clone(),
             no_update_check: !self.update_check,
         })
     }
@@ -265,6 +269,7 @@ pub fn write_install_files(c: &Config, ifname: &str, wintun: Option<String>) -> 
         no_port_mapping: c.no_port_mapping,
         no_ipv6: c.no_ipv6,
         accept_routes: c.accept_routes,
+        exit_node: c.exit_node.clone(),
         update_check: !c.no_update_check,
     };
     let path = default_config_path();
@@ -297,8 +302,8 @@ pub fn restrict(p: &Path) -> Result<()> {
 pub mod launchd {
     use super::*;
 
-    pub const LABEL: &str = "ro.1q.oneq";
-    const PLIST: &str = "/Library/LaunchDaemons/ro.1q.oneq.plist";
+    pub const LABEL: &str = "ro.example.oneq";
+    const PLIST: &str = "/Library/LaunchDaemons/ro.example.oneq.plist";
 
     pub fn install(exe: &Path, config: &Path, autostart: bool) -> Result<()> {
         let log = service_dir().join("client.log");
