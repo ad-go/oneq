@@ -1,7 +1,0 @@
-body { width: auto; max-width: 460px; }
-label { display: block; margin: 10px 0 2px; }
-input[type=text], input[type=password], textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 4px; }
-textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-h4 { margin: 14px 0 4px; font-size: 14px; }
-section + section { border-top: 1px solid rgba(128, 128, 128, .35); margin-top: 14px; padding-top: 4px; }
-button { font: inherit; padding: 4px 10px; }
