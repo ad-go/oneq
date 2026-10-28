@@ -19,6 +19,8 @@ class Settings {
   bool forceRelay = false;
   /// use the private networks the administrator routed through a gateway member
   bool acceptRoutes = false;
+  /// name of the exit node to route all internet traffic through (empty = disabled)
+  String exitNode = '';
   bool startHidden = false;
   /// Android: keep the (encrypted) connection config so the node starts at boot / as always-on VPN
   bool autoStart = false;
@@ -35,6 +37,7 @@ class Settings {
         'ca_pem': ca,
         'force_relay': forceRelay,
         'accept_routes': acceptRoutes,
+        'exit_node': exitNode,
         'start_hidden': startHidden,
         'auto_start': autoStart,
         'update_check': updateCheck,
@@ -62,6 +65,7 @@ class Settings {
     if (s.ca.isNotEmpty && !s.ca.contains('BEGIN CERTIFICATE')) throw const FormatException('"ca_pem" is not a PEM certificate');
     s.forceRelay = j['force_relay'] == true;
     s.acceptRoutes = j['accept_routes'] == true;
+    s.exitNode = (j['exit_node'] is String) ? j['exit_node'] as String : '';
     s.startHidden = j['start_hidden'] == true;
     s.autoStart = j['auto_start'] == true;
     s.updateCheck = j['update_check'] != false;
@@ -76,7 +80,7 @@ class ExportResult {
 
 /// State shared by the window, the tray menu and the settings page.
 class OneqController extends ChangeNotifier {
-  static const vpn = MethodChannel('ro.1q.oneq/vpn');
+  static const vpn = MethodChannel('ro.example.oneq/vpn');
   Settings settings = Settings();
   String password = ''; // memory only
   bool busy = false;
@@ -98,6 +102,7 @@ class OneqController extends ChangeNotifier {
         ..ca = p.getString('ca') ?? ''
         ..forceRelay = p.getBool('force') ?? false
         ..acceptRoutes = p.getBool('routes') ?? false
+        ..exitNode = p.getString('exitnode') ?? ''
         ..startHidden = p.getBool('hidden') ?? false
         ..autoStart = p.getBool('autostart') ?? false
         ..updateCheck = p.getBool('updatecheck') ?? true;
@@ -115,6 +120,7 @@ class OneqController extends ChangeNotifier {
       await p.setString('ca', settings.ca);
       await p.setBool('force', settings.forceRelay);
       await p.setBool('routes', settings.acceptRoutes);
+      await p.setString('exitnode', settings.exitNode);
       await p.setBool('hidden', settings.startHidden);
       await p.setBool('autostart', settings.autoStart);
       await p.setBool('updatecheck', settings.updateCheck);
@@ -161,6 +167,7 @@ class OneqController extends ChangeNotifier {
           'key_file': await keyFile(),
           'force_relay': s.forceRelay,
           'accept_routes': s.acceptRoutes,
+          if (s.exitNode.isNotEmpty) 'exit_node': s.exitNode,
           'update_check': s.updateCheck,
         };
         final ok = await vpn.invokeMethod<bool>('start', {'config': jsonEncode(cfg), 'persist': s.autoStart});

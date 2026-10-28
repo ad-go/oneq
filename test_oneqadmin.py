@@ -213,6 +213,20 @@ class TestAdminUsersAndNodes(AdminFed):
         self.assertEqual((await self.a("DELETE", "/c/lan/users/carol", tok=tok))[0], 404)
         await eventually(lambda: self.nodes[1].reg.s.get("user", "lan/carol") is None)
 
+    async def test_user_settings_download(self):
+        tok = await self.admin_token()
+        st, body = await self.a("GET", "/c/lan/users/bob/settings", tok=tok)
+        self.assertEqual(st, 200)
+        self.assertEqual(body["format"], "oneq-settings")
+        s = body["settings"]
+        self.assertEqual(s["community"], "lan")
+        self.assertEqual(s["user"], "bob")
+        self.assertIn(self.nodes[0].origin, s["relays"])
+        # unknown user -> 404
+        self.assertEqual((await self.a("GET", "/c/lan/users/nobody/settings", tok=tok))[0], 404)
+        # unknown community -> 404
+        self.assertEqual((await self.a("GET", "/c/nope/users/bob/settings", tok=tok))[0], 404)
+
     async def test_nodes_are_listed_with_their_relay_and_can_be_removed(self):
         tok = await self.admin_token()
         bob = await self.token(0, "bob", "bob-password!")

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Checks a relay from the outside: TCP/TLS (certificate matches the name and the private CA), /v1/health, and the UDP STUN service
-# (oneqnode nat-check). Usage: deploy/check-public.sh HOST PORT CA.pem      e.g.  deploy/check-public.sh x.1q.ro 8443 deploy/oneq-ca.crt
+# (oneqnode nat-check). Usage: deploy/check-public.sh HOST PORT CA.pem      e.g.  deploy/check-public.sh x.example.com 8443 deploy/oneq-ca.crt
 set -u
 HOST=${1:?host}; PORT=${2:-8443}; CA=${3:?CA certificate (PEM)}
 HERE=$(cd "$(dirname "$0")/.." && pwd)

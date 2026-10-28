@@ -54,12 +54,12 @@ if [ -n "$RELAY" ] && [ -n "$COMMUNITY" ] && [ -n "$USER_" ] && [ "$STARTUP" = 1
   [ -n "$NAME" ] && CMD="$CMD --name $NAME"
   echo "$CMD" > "$DEST/proxy-command.txt"
   if [ "$OS" = Darwin ]; then
-    PLIST="$HOME/Library/LaunchAgents/ro.1q.oneq.proxy.plist"
+    PLIST="$HOME/Library/LaunchAgents/ro.example.oneq.proxy.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
     {
       echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-      echo '<plist version="1.0"><dict><key>Label</key><string>ro.1q.oneq.proxy</string><key>ProgramArguments</key><array>'
+      echo '<plist version="1.0"><dict><key>Label</key><string>ro.example.oneq.proxy</string><key>ProgramArguments</key><array>'
       for a in $CMD; do echo "<string>$a</string>"; done
       echo "</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer>"
       echo "<key>StandardOutPath</key><string>$DEST/proxy.log</string><key>StandardErrorPath</key><string>$DEST/proxy.log</string></dict></plist>"

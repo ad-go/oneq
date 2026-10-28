@@ -439,7 +439,12 @@ class TestTls(unittest.TestCase):
             m.close()
 
     def test_plain_pq_context_would_fail(self):
-        """Control: the unmodified pqtls context cannot talk to a classical server, so the override in _tls_context is what makes it work."""
+        """Control: the unmodified pqtls context cannot talk to a classical server, so the override in _tls_context is what makes it work.
+
+        Only meaningful on OpenSSL >= 3.3 where X25519MLKEM768 is actually supported; on older builds the group is
+        silently ignored and both sides fall back to classical X25519, so the failure cannot be provoked."""
+        if ssl.OPENSSL_VERSION_INFO < (3, 3, 0):
+            self.skipTest("OpenSSL < 3.3 does not support X25519MLKEM768; PQ-only restriction is inactive")
         m = Mock(tls=(self.crt, self.key))
         try:
             ctx = pqtls.client_context(self.crt)

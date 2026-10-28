@@ -1,113 +1,94 @@
-# Exposing oneqrelay to the internet
+# Acces public la relay-urile oneq (x și y)
 
-A oneqrelay needs two things from the outside world: **TCP** (HTTPS or HTTP behind a TLS reverse proxy) for login, registry and
-the relay WebSocket, and **UDP** for the STUN service that nodes use to learn their public address and NAT type.
-This page lists what to forward and how to check it. Addresses below are documentation examples (`203.0.113.0/24`).
+Starea de acum (verificată): relay-urile **x** și **y** ascultă pe `0.0.0.0:8443` (TCP, TLS 1.3 X25519MLKEM768) și pe **UDP 8443, 8444, 8445**
+(serviciul STUN), sunt federate între ele prin rețeaua privată (`https://10.1.0.2:8443` / `https://10.1.0.1:8443`) și au certificate semnate de
+**CA-ul privat al proiectului** (`deploy/oneq-ca.crt`). Din internet nu se văd încă, pentru că hostul fizic/marginea nu redirecționează aceste porturi.
+Ce rămâne de făcut este exclusiv pe gazda care are adresele publice (nu în containere).
 
-## 1. What must be reachable
+## 1. Ce trebuie redirecționat
 
-| Public address | Protocol and public port → port on the relay | Purpose |
-|---|---|---|
-| 203.0.113.10 (`x.example.org`) | **TCP 443** (or 8443) → relay | login, registry, relay WebSocket |
-| 203.0.113.10 | **UDP 8443, 8444, 8445** → same ports | STUN (public address, NAT type, reachability tests) |
-| 203.0.113.11 (`y.example.org`) | same | second relay (federation, failover) |
+| Adresă publică | Container | Protocol și port public → port în container | Pentru |
+|---|---|---|---|
+| 86.120.110.185 (x.example.com) | x, 172.172.0.221 | **TCP 8443** → 8443 | login, registru, relay WebSocket |
+| 86.120.110.185 | x | **UDP 8443, 8444, 8445** → aceleași | STUN (adresa publică, tipul de NAT, teste de accesibilitate) |
+| 86.120.110.186 (y.example.com) | y, 172.172.0.222 | **TCP 8443** → 8443 | idem |
+| 86.120.110.186 | y | **UDP 8443, 8444, 8445** → aceleași | idem |
 
-* The public UDP ports must be the **same numbers** as on the relay: nodes derive the STUN ports from the relay's HTTPS port
-  (`stun_port` in `relay.conf`), and the relay announces them exactly as it bound them.
-* One address serves one relay on these ports. Plain nodes need no open port: they find their public address through STUN.
-* A container or VM usually cannot reach its own public address (no hairpin NAT). Nodes on the same private network
-  should use the relay's private address, which must then be present in the certificate (SAN), or the host must resolve the
-  public name to the private address.
+* Porturile publice trebuie să fie **aceleași numere** ca în container (8443/8444/8445): clientul calculează porturile STUN din portul HTTPS
+  al relay-ului, iar relay-ul le anunță clienților exact așa cum le-a legat.
+* x și m au aceeași adresă publică (.185), la fel y și n (.186). Pe fiecare adresă merge **un singur** relay pe aceste porturi: x pe .185, y pe .186.
+  Containerele m și n sunt doar noduri (nu au nevoie de porturi deschise: își găsesc adresa publică prin STUN).
+* Nu intră în conflict cu nimic existent: pe 8443-8445 nu mai ascultă nimic; nodurile de test folosesc UDP 51820.
+* Un container **nu** ajunge la adresa publică proprie (verificat: x și m nu ajung la `https://x.example.com`, y și n nu ajung la `https://y.example.com`).
+  Nodurile din rețeaua privată folosesc de aceea adresele private `https://10.1.0.1:8443` / `https://10.1.0.2:8443` (certificatele le au în SAN).
 
-## 2. Two supported layouts
+## 2. Fragmente gata de aplicat (alegeți ce se potrivește gazdei)
 
-**A. The relay terminates TLS** (`listen = 0.0.0.0:8443`, `cert =`, `key =` in `relay.conf`). TLS 1.3 with the hybrid group
-`X25519MLKEM768` (OpenSSL >= 3.5). Forward TCP 8443 and UDP 8443-8445 to the relay.
-
-**B. A reverse proxy terminates TLS** (nginx, HAProxy, ...). The relay listens on plain HTTP inside a private network:
-
-```
-[relay]
-listen = 0.0.0.0:80
-insecure_http = yes
-trust_proxy = yes     # the client address is the last X-Forwarded-For entry set by the proxy
-stun_port = 8443      # STUN stays on UDP 8443-8445, forwarded directly to the relay
-```
-
-The proxy must pass WebSocket upgrades and keep idle connections open (nginx example):
-
-```
-location / {
-    proxy_pass http://relay:80;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection $proxy_connection;   # or "upgrade"
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-}
-```
-
-With `trust_proxy = yes` the relay believes `X-Forwarded-For`. Publish the relay's HTTP port **only** to the proxy (a private
-Docker network, a Unix socket or a firewall rule), never to the internet; otherwise any client can forge its address and
-bypass rate limits and the reachability test.
-
-Layout B means the TLS connection to the relay is no longer post-quantum-only unless the proxy is configured for it
-(`ssl_ecdh_curve X25519MLKEM768:...`). The tunnels between nodes stay post-quantum either way: that protection does not depend on the
-TLS in front of the registry.
-
-UDP can be forwarded with plain DNAT (the relay then sees the real client address). A UDP proxy in `stream` mode hides it, and the
-reachability test and the rate limiting would see the proxy's address.
-
-## 3. Forwarding snippets
-
-nftables on the host that owns the public address (add an `accept` rule in `forward` if its policy is `drop`):
+**nftables pe gazda care are adresele publice** (DNAT; adăugați și o regulă `accept` în lanțul `forward` dacă politica e `drop`):
 
 ```
 table ip oneq_public {
   chain prerouting {
     type nat hook prerouting priority dstnat; policy accept;
-    ip daddr 203.0.113.10 tcp dport 8443 dnat to 192.168.0.10:8443
-    ip daddr 203.0.113.10 udp dport 8443-8445 dnat to 192.168.0.10
+    ip daddr 86.120.110.185 tcp dport 8443 dnat to 172.172.0.221:8443
+    ip daddr 86.120.110.185 udp dport 8443-8445 dnat to 172.172.0.221
+    ip daddr 86.120.110.186 tcp dport 8443 dnat to 172.172.0.222:8443
+    ip daddr 86.120.110.186 udp dport 8443-8445 dnat to 172.172.0.222
   }
 }
 ```
 
-Docker / Compose:
+**Docker / Compose** (dacă gazda pornește containerele): pentru x
 
 ```
 ports:
-  - "203.0.113.10:8443:8443/udp"
-  - "203.0.113.10:8444:8444/udp"
-  - "203.0.113.10:8445:8445/udp"
+  - "86.120.110.185:8443:8443/tcp"
+  - "86.120.110.185:8443:8443/udp"
+  - "86.120.110.185:8444:8444/udp"
+  - "86.120.110.185:8445:8445/udp"
 ```
 
-## 4. How a client joins from the internet
+și pentru y la fel cu `86.120.110.186`.
 
-* Relay addresses, both for failover: `https://x.example.org` and `https://y.example.org` (add the port if you use 8443).
-* If the certificates come from a private CA, import it once: the apps have a "Private CA certificate" field in Settings (or import a
-  settings file containing it); on the command line use `oneqclient up --cafile ca.crt ...` or `oneqnode run --cafile /etc/oneq/ca.crt ...`.
-  With a public CA (for example Let's Encrypt in front of the relay) nothing has to be imported.
-* Accounts are created with `oneqrelay admin ...` or in the admin page.
+**Proxy cu modul stream** (dacă marginea e un nginx/HAProxy): TCP 8443 se poate trece **doar ca flux TCP** (`stream { server { listen 86.120.110.185:8443; proxy_pass 172.172.0.221:8443; } }`),
+**fără** terminare TLS: certificatul trebuie să rămână cel al relay-ului (clientul cere TLS 1.3 cu X25519MLKEM768 direct cu relay-ul).
+UDP: `listen 86.120.110.185:8443 udp; proxy_pass 172.172.0.221:8443;` (și 8444, 8445), cu `proxy_responses 1;`.
+Un proxy care păstrează adresa sursă nu e necesar; relay-ul vede adresa publică a clientului doar dacă pachetele nu sunt mascate (cu DNAT simplu o vede corect;
+un proxy în modul stream o ascunde, iar testul de accesibilitate și limitarea de rată ar vedea adresa proxy-ului).
 
-## 5. Verification
+Adresele containerelor (172.172.0.221/.222) sunt cele de acum; dacă se schimbă la o repornire, actualizați regulile.
 
-From a computer **outside** the network (another connection, not the one the servers are on):
+## 3. Cum se conectează un client din internet
+
+* Adresele relay-urilor: `https://x.example.com:8443` și `https://y.example.com:8443` (ambele, pentru failover).
+* **CA-ul trebuie importat o dată** (certificatele nu sunt de la o autoritate publică): `deploy/oneq-ca.crt`, amprenta SHA-256
+  `87:B8:F1:4B:DB:30:85:19:43:92:CC:12:4C:A4:AA:0B:9E:AD:4E:44:AC:7A:07:6E:EB:0F:FF:2E:DD:1F:8F:B1`.
+  - aplicațiile: câmpul „Private CA certificate” din Setări (sau importul unui fișier de setări care îl conține);
+  - `oneqclient up --cafile oneq-ca.crt …`, `oneqnode run --cafile /etc/oneq/ca.crt …`.
+* Comunitatea de pe x și y se numește `oneq` (subnet 10.10.10.0/24); conturile se creează cu `oneqrelay admin …` sau din pagina de administrare.
+
+## 4. Verificare după ce s-au făcut redirecționările
+
+De pe un calculator din **afara** rețelei (de preferință de pe altă conexiune, nu de pe aceeași rețea cu serverele):
 
 ```
-deploy/check-public.sh x.example.org 8443 deploy/oneq-ca.crt
+deploy/check-public.sh x.example.com 8443 deploy/oneq-ca.crt
+deploy/check-public.sh y.example.com 8443 deploy/oneq-ca.crt
 ```
 
-The script checks TCP (the certificate matches the name and validates against the CA), `/v1/health`, and runs `oneqnode nat-check`
-(UDP, the three ports). Expected: `NAT type` is the type of the client's NAT, not "blocked". If TCP works but `nat-check`
-says `blocked`, the UDP forwarding is missing.
+Scriptul verifică TCP 8443 (certificatul se potrivește cu numele și se validează cu CA-ul), `/v1/health`, și rulează `oneqnode nat-check` (UDP, cele trei porturi).
+Rezultat așteptat: `NAT type` = tipul NAT-ului clientului, nu „blocked”. Dacă TCP merge dar `nat-check` spune `blocked`, lipsesc redirecționările UDP.
 
-## 6. Operator decisions
+## 5. Ce nu este activat (decizii pentru operator)
 
-* **Admin page** (`/admin/`): enabled only when `admin_password_file` is set. Protections: operator password (at least 12 characters)
-  plus a TOTP code (mandatory), lock-out after failures (5 → 60 s, doubling up to 15 min), every code usable once, a 1 h session
-  token kept only in the page's memory, strict CSP, every change logged with the client address. `admin_allow = <networks>` in
-  `relay.conf` hides it (404) from everyone else; recommended if you administer from known addresses only. Enrol the TOTP
-  (`oneqrelay admin-totp --out FILE`), move the password to a password manager and delete the enrolment files. If the phone is lost, use the
-  recovery codes or create a new TOTP file on the server and enrol again.
-* **Certificates**: keep the private CA key off the servers. Renewal: new key on the relay, signed by the CA, installed as `cert =` and
-  `key =`, then restart the service.
+* **Pagina de administrare** (`https://x.example.com:8443/admin/`, `https://y.example.com:8443/admin/`) este **pornită** pe ambele relay-uri, deci se vede din internet imediat ce
+  portul 8443 e redirecționat. Protecții: parolă de operator + cod TOTP din aplicația authenticator (obligatoriu), blocare după eșecuri (5 → 60 s, dublu până la 15 min),
+  fiecare cod o singură dată, jeton de sesiune de 1 h doar în memoria paginii, CSP strict, fiecare modificare în jurnal cu adresa clientului.
+  Opțional `admin_allow = <rețele>` în `relay.conf` o ascunde (404) pentru restul lumii: recomandat dacă administrați doar de la adrese cunoscute.
+  Înrolarea: fișierele `x.txt`, `y.txt` (parola și datele pentru aplicație) și `x-qr.png`/`y-qr.png` (codul QR) sunt în `C:/oneq/oneq-admin-2fa` pe PC-ul de administrare;
+  după ce ați scanat codul și ați mutat parola într-un manager de parole, ștergeți fișierele. Dacă pierdeți telefonul: codurile de recuperare, sau pe server
+  `sudo -u oneqrelay oneqrelay admin-totp --out /var/lib/oneq/relay/admin.totp --force` (cere o nouă înrolare).
+* **Certificate:** valabile până la 19.10.2028; CA-ul până în 2036. Cheia CA (`C:/oneq/oneq-ca/ca.key` pe PC-ul de administrare) nu se copiază pe servere.
+  Reînnoire: `openssl req` pe relay (cheie nouă) → semnare cu CA-ul → `/etc/oneq/relay.crt` și `systemctl restart oneqrelay`.
+* **Certificat public (Let's Encrypt):** certificatele publice sunt la margine, nu în containere, deci relay-ul nu are acces la ele. Dacă vreți clienți fără import de CA,
+  un certificat public pentru `x.example.com`/`y.example.com` trebuie emis în container (HTTP-01 sau DNS-01) și pus în `cert =`/`key =` din `relay.conf`.

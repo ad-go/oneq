@@ -49,6 +49,8 @@ pub struct Member {
     pub relay_kbps: Option<u32>,
     /// delegated relay nodes the member holds a session with
     pub relays: Vec<[u8; 16]>,
+    /// the administrator marked this node as an exit node: members may route internet traffic through it
+    pub exit_node: bool,
 }
 
 /// The login was refused (HTTP 401). With several oneqrelays this is not final: a freshly started one may not have
@@ -466,6 +468,7 @@ pub fn parse_members(v: &Value) -> Vec<Member> {
                 offer: m["offer"].as_bool().unwrap_or(false),
                 relay_kbps: m["relay_role"]["max_kbps"].as_u64().map(|k| k.min(u32::MAX as u64) as u32),
                 relays: m["relays"].as_array().map(|a| a.iter().filter_map(|e| hex::decode(e.as_str()?).ok()?.try_into().ok()).collect()).unwrap_or_default(),
+                exit_node: m["exit_node"].as_bool().unwrap_or(false),
             })
         })();
         if let Some(m) = parsed {

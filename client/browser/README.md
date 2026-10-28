@@ -74,7 +74,7 @@ tests: `node --test test/update.test.js`. A download needs the popup or settings
 ## Store packages (Chrome Web Store, Edge Add-ons, addons.mozilla.org)
 
 `python client/browser/build-store.py` writes `client/dist-store/` (reproducible, ignored by git): `oneq-mesh-chromium-VERSION.zip` (Chrome, Edge, Brave), `oneq-mesh-firefox-VERSION.zip`
-(Firefox: event page, `proxy.onRequest` instead of a PAC script, gecko id `k@1q.ro`, declaration that no data is collected, `<all_urls>` host permission which Firefox needs for
+(Firefox: event page, `proxy.onRequest` instead of a PAC script, gecko id `k@example.com`, declaration that no data is collected, `<all_urls>` host permission which Firefox needs for
 `proxy.onRequest`), `store-listing/` (descriptions, permission justifications, privacy policy, `PUBLISHING.md`) and `SHA256SUMS`. Not published, not signed: that needs the publisher's own store
 accounts (see `store/PUBLISHING.md`). A release Firefox installs only signed add-ons, so until AMO signs the file it can be loaded only temporarily (`about:debugging` > Load Temporary Add-on).
 `web-ext lint` on the Firefox build: 0 errors, 0 warnings.

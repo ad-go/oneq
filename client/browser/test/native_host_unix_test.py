@@ -60,7 +60,7 @@ def main():
             raise SystemExit(f"port {p} is in use")
     h = Host()
     r = h.call("hello")
-    ok(f"hello ({r.get('host')} {r.get('version')} on {r.get('os')})", r["ok"] and r["host"] == "ro.1q.oneq")
+    ok(f"hello ({r.get('host')} {r.get('version')} on {r.get('os')})", r["ok"] and r["host"] == "ro.example.oneq")
     r = h.call("get")
     ok("a new host has nothing configured", r["ok"] and not r["complete"] and not r["has_password"])
     r = h.call("start")
@@ -119,12 +119,12 @@ def main():
         os.makedirs(os.path.join(base if sys.platform == "darwin" else fake, d))
     fenv = dict(env, HOME=fake)
     out = subprocess.run([client, "native-host", "install", "--extension-id", "a" * 32], capture_output=True, text=True, env=fenv).stdout
-    nm = lambda b, name: os.path.join(base if sys.platform == "darwin" else fake, dirs[b], "NativeMessagingHosts" if name != "firefox" or sys.platform == "darwin" else "native-messaging-hosts", "ro.1q.oneq.json")
+    nm = lambda b, name: os.path.join(base if sys.platform == "darwin" else fake, dirs[b], "NativeMessagingHosts" if name != "firefox" or sys.platform == "darwin" else "native-messaging-hosts", "ro.example.oneq.json")
     chrome_m = json.load(open(nm("chrome", "chrome")))
     ff_m = json.load(open(nm("firefox", "firefox")))
     ok("install writes the Chromium manifest with the dev id and the given id", chrome_m["allowed_origins"] == ["chrome-extension://" + "a" * 32 + "/"] and chrome_m["type"] == "stdio"
        and os.path.samefile(chrome_m["path"], client))
-    ok("install writes the Firefox manifest with the add-on id", ff_m["allowed_extensions"] == ["k@1q.ro"])
+    ok("install writes the Firefox manifest with the add-on id", ff_m["allowed_extensions"] == ["k@example.com"])
     ok("install skips the browsers that are not there", "edge: not installed" in out and os.path.exists(nm("brave", "brave")))
     subprocess.run([client, "native-host", "uninstall"], capture_output=True, text=True, env=fenv)
     ok("uninstall removes the registrations", not os.path.exists(nm("chrome", "chrome")) and not os.path.exists(nm("firefox", "firefox")))

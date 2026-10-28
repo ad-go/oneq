@@ -8,7 +8,7 @@ oneq is an **educational project without an independent cryptographic audit**. D
 Please report privately, not in a public issue:
 
 * GitHub: Security tab of the repository, "Report a vulnerability" (private vulnerability reporting), or
-* e-mail: `<SECURITY-CONTACT>` (to be filled in before the repository is published).
+* e-mail: `k@example.com`
 
 Include what you found, the version (the package version, `oneqrelay` / `oneqclient` build) and a way to reproduce it.
 There is no bug bounty and no guaranteed response time.

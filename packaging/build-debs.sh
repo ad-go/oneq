@@ -50,7 +50,7 @@ d}" "$SRC/packaging/common/copyright.in" > "$doc/copyright" <<< "$bundled"
         echo "  * Fix: a member that joins later is discovered by the others within seconds (member list refreshed"
         echo "    every 5 s, and at once when a hole-punch arrives from an unknown address); before, up to 20 s."
         echo
-        echo " -- oneq <k@1q.ro>  $(date -R -u -d '2026-10-18 12:00:00')"
+        echo " -- oneq <k@example.com>  $(date -R -u -d '2026-10-18 12:00:00')"
     } | gzip -9n > "$doc/changelog.gz"
     if [ "$name" = oneqrelay ]; then
         mkdir -p "$doc/examples"
@@ -93,20 +93,20 @@ build_meta() {
     {
         echo "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
         echo "Upstream-Name: oneq"
-        echo "Upstream-Contact: oneq <k@1q.ro>"
+        echo "Upstream-Contact: oneq <k@example.com>"
         echo
         echo "Files: *"
-        echo "Copyright: 2026 ad-go"
-        echo "License: Apache-2.0"
-        echo " On Debian systems the full text of the Apache License, Version 2.0 is in"
-        echo " /usr/share/common-licenses/Apache-2.0."
+        echo "Copyright: 2026 oneq <k@example.com>"
+        echo "License: unspecified"
+        echo " No license has been chosen for this software yet: all rights are reserved by the"
+        echo " copyright holder. Choose and add a license before redistributing the packages."
     } > "$doc/copyright"
     {
         echo "$name ($VERSION) unstable; urgency=medium"
         echo
         echo "  * Meta-package: depends on oneqnode and oneqrelay of the same version."
         echo
-        echo " -- oneq <k@1q.ro>  $(date -R -u -d '2026-10-18 12:00:00')"
+        echo " -- oneq <k@example.com>  $(date -R -u -d '2026-10-18 12:00:00')"
     } | gzip -9n > "$doc/changelog.gz"
     sed -i 's/\r$//' "$root/DEBIAN/control"
     sed -i "s/@VERSION@/$VERSION/g" "$root/DEBIAN/control"

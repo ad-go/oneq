@@ -205,6 +205,33 @@ class _SettingsPageState extends State<SettingsPage> {
             value: c.settings.acceptRoutes,
             onChanged: _locked ? null : (v) => setState(() => c.settings.acceptRoutes = v),
           ),
+          ListenableBuilder(
+            listenable: c,
+            builder: (_, _) {
+              final exitPeers = (c.snap?.peers ?? []).where((p) => p.exitNode).toList();
+              final options = [
+                const DropdownMenuItem(value: '', child: Text('None — direct internet')),
+                ...exitPeers.map((p) => DropdownMenuItem(
+                  value: p.name,
+                  child: Text('${p.name}${p.publicIp.isNotEmpty ? '  (${p.publicIp})' : ''}'),
+                )),
+                if (c.settings.exitNode.isNotEmpty && !exitPeers.any((p) => p.name == c.settings.exitNode))
+                  DropdownMenuItem(value: c.settings.exitNode, child: Text(c.settings.exitNode)),
+              ];
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: DropdownButtonFormField<String>(
+                  initialValue: c.settings.exitNode.isEmpty ? '' : c.settings.exitNode,
+                  decoration: const InputDecoration(
+                    labelText: 'Exit node (route internet traffic through)',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: options,
+                  onChanged: _locked ? null : (v) => setState(() => c.settings.exitNode = v ?? ''),
+                ),
+              );
+            },
+          ),
           if (desktop)
             SwitchListTile(
               title: const Text('Start hidden in the tray'),

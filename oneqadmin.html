@@ -218,6 +218,7 @@ function viewCommunity() {
         el('td', { class: 'act' },
           el('button', { class: 'small', onclick: () => editUser(name, u) }, 'Edit'), ' ',
           el('button', { class: 'small', onclick: () => passwd(name, u.user) }, 'Password'), ' ',
+          el('button', { class: 'small', onclick: () => dlSettings(name, u.user) }, 'Settings↓'), ' ',
           el('button', { class: 'small', onclick: () => act(() => api('PUT', `/c/${enc(name)}/users/${enc(u.user)}`, { disabled: !u.disabled }), u.disabled ? 'User enabled' : 'User disabled (sessions revoked)') }, u.disabled ? 'Enable' : 'Disable'), ' ',
           el('button', { class: 'small danger', onclick: () => delUser(name, u.user) }, 'Delete')))))),
       c.users.length ? null : el('p', { class: 'muted' }, 'No users: nobody can join this community yet.'),
@@ -270,6 +271,22 @@ async function passwd(comm, user) {
   if (v) act(() => api('PUT', `/c/${encodeURIComponent(comm)}/users/${encodeURIComponent(user)}`, { password: v.password }), 'Password changed');
 }
 async function delUser(comm, user) { const v = await ask('Delete user', [{ type: 'info', label: 'Delete ' + user + '? Their nodes stay registered until removed.' }], 'Delete'); if (v) act(() => api('DELETE', `/c/${encodeURIComponent(comm)}/users/${encodeURIComponent(user)}`), 'User deleted'); }
+async function dlSettings(comm, user) {
+  const v = await ask('Device name for import', [
+    { name: 'name', label: 'Device name', hint: 'phone, laptop, work-pc …', value: '' }
+  ], 'Download');
+  if (!v) return;
+  try {
+    const r = await fetch(`/admin/api/c/${encodeURIComponent(comm)}/users/${encodeURIComponent(user)}/settings`,
+      { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (!r.ok) { toast((await r.text()) || ('HTTP ' + r.status), true); return; }
+    const data = await r.json();
+    if (v.name.trim()) data.settings.name = v.name.trim();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `oneq-settings-${comm}-${user}.json`; document.body.appendChild(a); a.click(); a.remove();
+  } catch (e) { toast(e.message, true); }
+}
 async function grantRelay(comm, n) {
   const v = await ask('Delegate ' + (n.name || n.id.slice(0, 8)) + ' as a relay node', [{ type: 'info', label: 'The members will send datagrams that cannot go directly through this node (over UDP). The datagrams stay end-to-end encrypted; the node sees who talks to whom and how much. It must be reachable from outside (open or cone NAT).' },
     { name: 'mbit', label: 'Bandwidth limit (Mbit/s)', value: '20' }, { name: 'days', label: 'Valid for (days, 0 = until withdrawn)', value: '0' }, { name: 'force', label: 'Even if not known to be reachable', type: 'select', options: ['no', 'yes'], value: 'no' }], 'Delegate');

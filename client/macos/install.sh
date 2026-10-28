@@ -77,7 +77,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>ro.1q.oneq.menubar</string>
+  <key>CFBundleIdentifier</key><string>ro.example.oneq.menubar</string>
   <key>CFBundleName</key><string>oneq</string>
   <key>CFBundleExecutable</key><string>oneq</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -92,13 +92,13 @@ rm -f "$HOME/Desktop/oneq"
 osascript -e "tell application \"Finder\" to make new alias file to POSIX file \"$APP\" at desktop with properties {name:\"oneq\"}" >/dev/null 2>&1 || true
 
 echo "== starting the icon at login"
-PLIST="$HOME/Library/LaunchAgents/ro.1q.oneq.menubar.plist"
+PLIST="$HOME/Library/LaunchAgents/ro.example.oneq.menubar.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>ro.1q.oneq.menubar</string>
+  <key>Label</key><string>ro.example.oneq.menubar</string>
   <key>ProgramArguments</key><array><string>$ONEQ</string><string>menubar</string></array>
   <key>RunAtLoad</key><true/>
 </dict></plist>

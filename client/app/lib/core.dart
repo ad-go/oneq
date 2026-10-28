@@ -23,14 +23,16 @@ class OneqError implements Exception {
 }
 
 class Peer {
-  final String name, ip, path;
-  final bool online, session;
+  final String name, ip, path, publicIp;
+  final bool online, session, exitNode;
   Peer(Map<String, dynamic> j)
       : name = j['name'] ?? '',
         ip = j['ip'] ?? '',
         path = j['path'] ?? '-',
+        publicIp = j['public_ip'] ?? '',
         online = j['online'] ?? false,
-        session = j['session'] ?? false;
+        session = j['session'] ?? false,
+        exitNode = j['exit_node'] == true;
 }
 
 /// Result of an update check (spec: UPDATE-SPEC.md). Network work is done by the Rust core.

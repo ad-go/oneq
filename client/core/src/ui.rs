@@ -48,7 +48,7 @@ pub fn new_token() -> String {
 }
 
 // ---------------------------------------------------------------------------------------------------- settings
-const EMPTY_SETTINGS: &str = r#"{"relays":[],"community":"","user":"","name":"","ca_pem":"","force_relay":false,"accept_routes":false,"update_check":true,"auto_start":false,"start_hidden":false}"#;
+const EMPTY_SETTINGS: &str = r#"{"relays":[],"community":"","user":"","name":"","ca_pem":"","force_relay":false,"accept_routes":false,"exit_node":"","update_check":true,"auto_start":false,"start_hidden":false}"#;
 
 fn load_settings(c: &UiConfig) -> Value {
     std::fs::read_to_string(c.settings_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::from_str(EMPTY_SETTINGS).unwrap())
@@ -85,6 +85,7 @@ pub fn validate_settings(v: &Value) -> Result<Value> {
         "ca_pem": ca,
         "force_relay": v["force_relay"] == true,
         "accept_routes": v["accept_routes"] == true,
+        "exit_node": v["exit_node"].as_str().unwrap_or(""),
         "update_check": v["update_check"] != false,
         "auto_start": v["auto_start"] == true,
         "start_hidden": v["start_hidden"] == true,
@@ -160,7 +161,7 @@ fn installed() -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        Path::new("/Library/LaunchDaemons/ro.1q.oneq.plist").exists()
+        Path::new("/Library/LaunchDaemons/ro.example.oneq.plist").exists()
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -289,6 +290,9 @@ fn connect(c: &UiConfig, body: &Value) -> Result<String> {
     }
     if s["accept_routes"] == true {
         args.push("--accept-routes".into());
+    }
+    if let Some(en) = s["exit_node"].as_str().filter(|s| !s.is_empty()) {
+        args.extend(["--exit-node".into(), en.to_string()]);
     }
     if s["update_check"] == false {
         args.push("--no-update-check".into());

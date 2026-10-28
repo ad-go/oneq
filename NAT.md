@@ -1,6 +1,6 @@
 # NAT traversal (English)
 
-Companion to the NAT sections of `README.md` and `ARCHITECTURE.md`, including the
+English version of the section "Noduri în spatele NAT" of `README.md` and of "NAT (oneqnat)" in `ARCHITECTURE.md` (both in Romanian), including the
 four additions: router port mapping, IPv6, port prediction and second-NAT detection.
 
 Any node reaches any other through the relay (WebSocket, always attached). A direct UDP path is obtained in addition when the NATs allow it.

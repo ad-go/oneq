@@ -51,6 +51,10 @@ class MainActivity : FlutterActivity() {
                     ConfigStore.clear(this)
                     result.success(null)
                 }
+                "minimizeToBackground" -> {
+                    moveTaskToBack(true)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Removes the oneq client from macOS. Keeps the configuration and the node key unless --purge is given.
 set -uo pipefail
-PLIST="$HOME/Library/LaunchAgents/ro.1q.oneq.menubar.plist"
+PLIST="$HOME/Library/LaunchAgents/ro.example.oneq.menubar.plist"
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null
 rm -f "$PLIST"
 rm -rf "$HOME/Applications/oneq.app"

@@ -12,7 +12,7 @@ Only the mesh subnet is routed through the client, plus the networks of the rout
 | Platform | What runs | Notes |
 |---|---|---|
 | Windows (x64) | `oneqclient` as the service `oneq`; the Flutter app configures and watches it (tray icon) | Wintun driver DLL next to the executable |
-| macOS (Apple Silicon, Intel) | `oneqclient` as the launchd daemon `ro.1q.oneq`; menu-bar icon (`oneqclient menubar`); settings page (`oneqclient ui`) | the TUN node needs root; per-user install without root gives the proxy, the browser extension and the relay |
+| macOS (Apple Silicon, Intel) | `oneqclient` as the launchd daemon `ro.example.oneq`; menu-bar icon (`oneqclient menubar`); settings page (`oneqclient ui`) | the TUN node needs root; per-user install without root gives the proxy, the browser extension and the relay |
 | Android (arm64, armv7, x86_64) | foreground `VpnService` with a notification (peer count, Disconnect) | the node only; no relay (the relay is Python); routed networks with the "Use routed networks" switch |
 | Linux | `oneqclient` command line | root or `CAP_NET_ADMIN` for the TUN device |
 
@@ -28,7 +28,7 @@ Disconnect stops it and keeps it installed. On Android the optional start at boo
 | | service | UI |
 |---|---|---|
 | Windows | `oneqclient service install --relay ... --community ... --user ... --password-file F [--cafile CA]`, then `service start|stop|restart|status|uninstall`; files in `%ProgramData%\oneq` (`client.json`, `client.pass` and `client.key` readable by SYSTEM/Administrators only, `client.log`); reconnects by itself when the relay is unreachable; restarted by the service manager | tray icon (grey = off, orange = connecting, green = connected), menu Open / Settings / Connect / Quit; the close button hides the window to the tray |
-| macOS | launchd daemon `ro.1q.oneq` (`KeepAlive`, `RunAtLoad`), same `service` commands | menu-bar icon with the same three icons, a status line, "Open oneq..." and "Quit" |
+| macOS | launchd daemon `ro.example.oneq` (`KeepAlive`, `RunAtLoad`), same `service` commands | menu-bar icon with the same three icons, a status line, "Open oneq..." and "Quit" |
 | Android | `VpnService` | notification with a Disconnect button |
 
 `oneqclient ui` is the settings page (also usable on Windows and Linux): status and members, connection form, **Export/Import** (same file format as the Flutter app),
@@ -111,8 +111,8 @@ builds the three packages; `oneq-server` has no files of its own and depends on 
 ### macOS install
 
 * With administrator rights: `./install.sh` installs `oneqclient` root-owned in `/usr/local/libexec/oneq` (it runs as root in the launchd service), signs it ad-hoc, creates
-  `~/Applications/oneq.app` (+ an alias on the desktop) and starts the menu-bar icon at login. Then `sudo oneqclient service install` (LaunchDaemon `ro.1q.oneq`) and, for a relay,
-  `sudo oneqclient relay init` / `relay install` (LaunchDaemon `ro.1q.oneqrelay`). The TUN interface name must be `utunN`: any other name means "the next free utun". `uninstall.sh [--purge]` removes everything.
+  `~/Applications/oneq.app` (+ an alias on the desktop) and starts the menu-bar icon at login. Then `sudo oneqclient service install` (LaunchDaemon `ro.example.oneq`) and, for a relay,
+  `sudo oneqclient relay init` / `relay install` (LaunchDaemon `ro.example.oneqrelay`). The TUN interface name must be `utunN`: any other name means "the next free utun". `uninstall.sh [--purge]` removes everything.
 * Without administrator rights: `./install.sh --user` installs for the current user only: `oneqclient` in `~/Library/Application Support/oneq/bin` (link in `~/.local/bin`), the relay bundle
   next to it, no root-owned file, no `sudo`. With it: `oneqclient proxy ...` (the browser, see browser/README.md) and the relay as a **LaunchAgent** of the user:
   `oneqclient relay init --user ...`, `relay install --user` (data in `~/.config/oneq/relay`; it runs while the user is logged in; launchd restarts it). The TUN node needs root: utun cannot be created otherwise.
@@ -156,7 +156,7 @@ tar xzf oneq-node-macos-arm64.tar.gz        # or oneq-node-macos-x64.tar.gz
 cd oneq-macos && ./install.sh    # asks for the administrator password once; --user installs without root (no TUN node)
 
 sudo oneqclient service install --relay https://x.example.com:8443 --relay https://y.example.com:8443     --community oneq --user alice --password-file ~/alice.pw --cafile ~/ca.crt --name my-mac --accept-routes
-sudo oneqclient service status              # launchd daemon ro.1q.oneq; the log is /Library/Application Support/oneq/client.log
+sudo oneqclient service status              # launchd daemon ro.example.oneq; the log is /Library/Application Support/oneq/client.log
 ```
 
 The menu-bar icon (green = connected) opens the settings page, where the same connection can be entered or imported from a file. The installers are not code-signed:
@@ -198,7 +198,7 @@ python-build-standalone 3.13 (checksum-verified against the release's `SHA256SUM
 
     oneqclient relay init --name host.example.org [--ip PUBLIC.IP] [--port 8443]   # once (administrator): private CA + certificate, federation secret,
                                                                                   # admin password + authenticator (TOTP), relay.conf in <service dir>/relay
-    oneqclient relay install                      # service oneqrelay (Windows) / launchd ro.1q.oneqrelay (macOS); on Windows it also opens TCP 8443 + UDP 8443-8445
+    oneqclient relay install                      # service oneqrelay (Windows) / launchd ro.example.oneqrelay (macOS); on Windows it also opens TCP 8443 + UDP 8443-8445
     oneqclient relay admin community-add team 10.50.0.0/24      # communities and users (or the admin page /admin/, password + authenticator code)
     oneqclient relay admin user-add team alice --password-file F
     oneqclient relay selftest                     # TLS PQ handshake, STUN on the three UDP ports, admin login
