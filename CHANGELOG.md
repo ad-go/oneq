@@ -19,6 +19,12 @@ Compatibility rules are listed per release.
   (`GET /v1/bench`), schedules test functions at randomised intervals, and uploads results via `POST /v1/c/{comm}/perf`.
   Built-in tests: relay health (`ping_relay`) and member-list latency (`list_nodes`); stubs for session latency,
   local crypto benchmark and throughput burst (to be filled in).
+* **Linux GUI (`oneq-gui.py`) — member list and exit-node selector in service mode.** When the GUI detects a running
+  `oneqnode@<name>.service` (MODE\_SVC), it now logs in to the relay using the credentials in `/etc/oneq/node.conf`
+  and fetches the member list via `GET /v1/c/{comm}/nodes`. The members panel and the exit-node radio-button row are
+  shown exactly as in the API mode (Rust client). Previously, SVC mode showed only the local IP. The relay token is
+  cached in memory and refreshed as needed. Prerequisite: the user running the GUI must be in the `oneqnode` group
+  (`usermod -aG oneqnode <user>`; `chmod 640 /etc/oneq/node-mesh.password`).
 
 * **Redundant gateways**: the same network can be announced through up to 4 gateway nodes (`oneqrelay admin route-add COMMUNITY NETWORK NODE --prio N`, lower is preferred, default 100; `route-del COMMUNITY NETWORK [NODE]`;
   `PUT {via, prio}` and `DELETE ...?via=` in the API; the admin page lists one line per gateway with its priority). The record key now carries the gateway (`<comm>/<network>_<prefix>/<node id>`); records of the earlier
