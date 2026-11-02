@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the configuration files (/etc/oneq/relay.conf, /etc/oneq/node.conf)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import argparse

@@ -24,6 +24,7 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRV = os.path.join(HERE, "server")
 PY = sys.executable
 NS = {"A": "pqA", "B": "pqB", "S": "pqS"}
 CERT_IPS = ["10.77.1.254", "10.77.2.254"]
@@ -165,7 +166,7 @@ class TestEndToEnd(unittest.TestCase):
             sh("ip", "link", "set", va, "up", ns=a)
             sh("ip", "link", "set", vb, "up", ns=b)
         cls.cert, cls.key = make_cert(cls.d, CERT_IPS)
-        sys.path.insert(0, HERE)
+        sys.path.insert(0, SRV)
         import rendezvous_server as rs
         cls.tokfile = os.path.join(cls.d, "token")
         with open(cls.tokfile, "w") as f:
@@ -175,9 +176,9 @@ class TestEndToEnd(unittest.TestCase):
         with open(cls.hashfile, "w") as f:
             f.write(rs.token_hash("e2e-network-token") + "\n")
         for n in "AB":
-            subprocess.run([PY, os.path.join(HERE, "oneqtunel.py"), "genkey", "--key",
+            subprocess.run([PY, os.path.join(SRV, "oneqtunel.py"), "genkey", "--key",
                             os.path.join(cls.d, f"{n}.key")], check=True, capture_output=True)
-        cls.server = popen(PY, os.path.join(HERE, "rendezvous_server.py"), "run", "--listen", "0.0.0.0:8443",
+        cls.server = popen(PY, os.path.join(SRV, "rendezvous_server.py"), "run", "--listen", "0.0.0.0:8443",
                            "--cert", cls.cert, "--key", cls.key, "--tokens-file", cls.hashfile,
                            ns="S", log=os.path.join(cls.d, "server.log"))
         cls.procs.append(cls.server)
@@ -223,7 +224,7 @@ class TestEndToEnd(unittest.TestCase):
         self.__class__.stop_all()
         self.direct_link(link_up)
         self.name = name
-        self.srv = popen(PY, os.path.join(HERE, "rendezvous_server.py"), "run", "--listen", "0.0.0.0:8443",
+        self.srv = popen(PY, os.path.join(SRV, "rendezvous_server.py"), "run", "--listen", "0.0.0.0:8443",
                          "--cert", self.cert, "--key", self.key, "--tokens-file", self.hashfile,
                          ns="S", log=os.path.join(self.d, f"{name}.server.log"))
         self.procs.append(self.srv)
@@ -234,7 +235,7 @@ class TestEndToEnd(unittest.TestCase):
             self.procs.append(popen(PY, os.path.abspath(__file__), "--sniff", iface, out, ns="A"))
         pub = {}
         for n in "AB":
-            pub[n] = subprocess.run([PY, os.path.join(HERE, "oneqtunel.py"), "pubkey", "--key",
+            pub[n] = subprocess.run([PY, os.path.join(SRV, "oneqtunel.py"), "pubkey", "--key",
                                      os.path.join(self.d, f"{n}.key")], capture_output=True, text=True,
                                     check=True).stdout.strip()
         self.logs = {}
@@ -245,7 +246,7 @@ class TestEndToEnd(unittest.TestCase):
             peerfile = os.path.join(self.d, f"{name}.{other}.pub")
             with open(peerfile, "w") as f:
                 f.write(pub[other] + "\n")
-            self.procs.append(popen(PY, os.path.join(HERE, "oneqtunel.py"), "run", "--key",
+            self.procs.append(popen(PY, os.path.join(SRV, "oneqtunel.py"), "run", "--key",
                                     os.path.join(self.d, f"{n}.key"), "--peer", peerfile, "--ifname", "pq0",
                                     "--addr", addr, "--listen", "0.0.0.0:51820", "--advertise", adv,
                                     "--rendezvous", f"https://{rv}:8443", "--token-file", self.tokfile,

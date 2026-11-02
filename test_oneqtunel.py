@@ -7,6 +7,10 @@ an in-memory network, rendezvous REST API, WebSocket relay, and TLS group enforc
 (X25519MLKEM768 accepted; classic groups refused, no fallback).
 The root-only end-to-end test with real TUN devices is test_e2e.py.
 """
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401  (first: OPENSSL_CONF)
 
 import asyncio
@@ -34,6 +38,7 @@ import rendezvous_server as rs
 import oneqtunel as t
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRV = os.path.join(HERE, "server")
 OPENSSL = shutil.which("openssl")
 
 
@@ -641,7 +646,7 @@ class TestTlsPostQuantum(unittest.TestCase):
         cls.cert, cls.key = make_cert(cls.d)
         cls.port = free_port()
         cls.proc = subprocess.Popen(
-            [sys.executable, os.path.join(HERE, "rendezvous_server.py"), "run", "--listen",
+            [sys.executable, os.path.join(SRV, "rendezvous_server.py"), "run", "--listen",
              f"127.0.0.1:{cls.port}", "--cert", cls.cert, "--key", cls.key, "--open"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         assert wait_port(cls.port), "server did not start"

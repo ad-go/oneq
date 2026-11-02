@@ -1,5 +1,9 @@
 """Delegated relay nodes, data plane: a member that the administrator delegated forwards the (end-to-end encrypted) datagrams of two
 members that cannot reach each other directly. Real oneqrelay (registry), nodes on an in-memory UDP network with fake TAP devices."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

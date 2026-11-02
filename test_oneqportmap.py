@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Tests of oneqportmap: the PCP / NAT-PMP / UPnP codecs against the RFC layouts, and the mapper against simulated gateways on loopback
 (a PCP server, a NAT-PMP server, an UPnP IGD with SSDP answer, HTTP description and SOAP control), including hostile answers."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

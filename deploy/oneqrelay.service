@@ -9,10 +9,10 @@ User=oneqrelay
 Group=oneqrelay
 StateDirectory=oneqrelay
 # /etc/oneq/relay.env : ONEQRELAY_ARGS="--id r1 --listen 127.0.0.1:8080 --insecure-http --trust-proxy --fed-peer https://r2.example.org --cafile /etc/ssl/certs/ca-certificates.crt"
-# /etc/oneq/federation.secret : shared by every oneqrelay of the federation (mode 0600, from `oneqrelay.py gen-secret`)
+# /etc/oneq/federation.secret : shared by every oneqrelay of the federation (mode 0600, from `server/oneqrelay.py gen-secret`)
 EnvironmentFile=/etc/oneq/relay.env
 LoadCredential=secret:/etc/oneq/federation.secret
-ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/oneqrelay.py run --db ${STATE_DIRECTORY}/registry.db --secret-file %d/secret $ONEQRELAY_ARGS
+ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/server/oneqrelay.py run --db ${STATE_DIRECTORY}/registry.db --secret-file %d/secret $ONEQRELAY_ARGS
 Restart=on-failure
 RestartSec=3
 

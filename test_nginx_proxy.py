@@ -3,6 +3,10 @@
 no root) in front of rendezvous_server.py and checks that the PQ-only restriction holds.
 Skipped if nginx is missing or built against OpenSSL < 3.5.  Run: python3 test_nginx_proxy.py
 """
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio
@@ -22,6 +26,7 @@ import oneqtunel as t
 from test_oneqtunel import OPENSSL, free_port, make_cert, openssl_has_mlkem, wait_port
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRV = os.path.join(HERE, "server")
 NGINX = shutil.which("nginx") or next((p for p in ("/usr/sbin/nginx", "/usr/local/nginx/sbin/nginx")
                                        if os.path.exists(p)), None)
 
@@ -40,7 +45,7 @@ class TestNginxProxy(unittest.TestCase):
 
     @classmethod
     def backend_cmd(cls):
-        return [sys.executable, os.path.join(HERE, "rendezvous_server.py"), "run", "--listen",
+        return [sys.executable, os.path.join(SRV, "rendezvous_server.py"), "run", "--listen",
                 f"127.0.0.1:{cls.back}", "--insecure-http", "--trust-proxy", "--open"]
 
     @classmethod
@@ -136,7 +141,7 @@ class TestNginxOneqrelay(TestNginxProxy):
         reg = meshdb.Registry(meshdb.Store(os.path.join(cls.d, "r1.db"), "r1"), b"s" * 32)
         reg.create_community("lan", "10.50.0.0/24")
         reg.add_user("lan", "alice", "alice-password", "admin", max_nodes=10)
-        return [sys.executable, os.path.join(HERE, "oneqrelay.py"), "run", "--id", "r1", "--db",
+        return [sys.executable, os.path.join(SRV, "oneqrelay.py"), "run", "--id", "r1", "--db",
                 os.path.join(cls.d, "r1.db"), "--secret-file", cls.secret, "--listen", f"127.0.0.1:{cls.back}",
                 "--insecure-http", "--trust-proxy"]
 

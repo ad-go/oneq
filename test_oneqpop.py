@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Proof of possession of the node key: the codec (oneqpop), the relay endpoints (challenge, registration, downgrade protection,
 require_pop, federation) and a node registering with and without it."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

@@ -1,4 +1,8 @@
 """Tests of onequpdate: versions, SHA256SUMS, asset selection, network policy, verified download, TLS against a classical server."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401  (first, as in the real processes: OPENSSL_CONF restricts the groups)
 
 import asyncio

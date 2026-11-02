@@ -3,6 +3,10 @@
 fake TAP devices. Covers registration, automatic addresses, full-topology sessions, L2 switching
 (unicast / broadcast / flood / learning / anti-spoofing), relay fallback and return to direct, and
 failover between federated oneqrelays."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

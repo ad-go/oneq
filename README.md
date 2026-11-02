@@ -32,27 +32,27 @@ The signed apt repository is in Gitea, `ad-go/oneq-apt` (0.0.1, trixie/amd64; ke
 
 ```sh
 # 1. Same federation secret on all oneqrelay instances
-oneqrelay.py gen-secret > federation.secret && chmod 600 federation.secret
+server/oneqrelay.py gen-secret > federation.secret && chmod 600 federation.secret
 
 # 2. On the first oneqrelay: community and users (password from file / $TUNMESH_PASSWORD / prompt, never from arguments)
-oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret community-add lan 10.50.0.0/24
-oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret user-add lan alice --role admin --password-file alice.pw
-oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret list
+server/oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret community-add lan 10.50.0.0/24
+server/oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret user-add lan alice --role admin --password-file alice.pw
+server/oneqrelay.py admin --db r1.db --id r1 --secret-file federation.secret list
 
 # 3. Start the oneqrelay instances (TLS 1.3, X25519MLKEM768 only); accounts and nodes replicate between them
-oneqrelay.py run --id r1 --db r1.db --secret-file federation.secret --listen 0.0.0.0:8443     --cert fullchain.pem --key privkey.pem --fed-peer https://r2.example.org:8443 --cafile ca.pem
-oneqrelay.py run --id r2 --db r2.db --secret-file federation.secret ... --fed-peer https://r1.example.org:8443
+server/oneqrelay.py run --id r1 --db r1.db --secret-file federation.secret --listen 0.0.0.0:8443     --cert fullchain.pem --key privkey.pem --fed-peer https://r2.example.org:8443 --cafile ca.pem
+server/oneqrelay.py run --id r2 --db r2.db --secret-file federation.secret ... --fed-peer https://r1.example.org:8443
 
 # 4. On each node: own key, then join the community (IP and MAC come from oneqrelay)
-oneqnode.py genkey --key node.key
-oneqnode.py run --key node.key --relay https://r1.example.org:8443 --relay https://r2.example.org:8443     --community lan --user alice --password-file alice.pw --name laptop --advertise 203.0.113.5:51820 --listen 0.0.0.0:51820
+server/oneqnode.py genkey --key node.key
+server/oneqnode.py run --key node.key --relay https://r1.example.org:8443 --relay https://r2.example.org:8443     --community lan --user alice --password-file alice.pw --name laptop --advertise 203.0.113.5:51820 --listen 0.0.0.0:51820
 ```
 
 - Multiple `--relay` = automatic failover. A `oneqnode` stays on the network even when all oneqrelay instances go down.
-- Administration (`oneqrelay.py admin`): `community-add`, `community-subnet`, `user-add`, `user-passwd`, `user-disable`, `user-enable`, `user-del`, `node-del`, `relay-grant`, `relay-revoke`, `route-add`, `route-del`, `list`.
+- Administration (`server/oneqrelay.py admin`): `community-add`, `community-subnet`, `user-add`, `user-passwd`, `user-disable`, `user-enable`, `user-del`, `node-del`, `relay-grant`, `relay-revoke`, `route-add`, `route-del`, `list`.
   Changing the password or disabling an account immediately revokes all its tokens across the entire federation. `community-subnet COMMUNITY 10.10.10.0/24` moves the community to a different subnet: each node gets a new address (MACs, keys, users and routes remain)
   and picks it up on restart; rejected if the new subnet is too small or overlaps a route.
-- Bound to the address of an existing interface: `oneqnode.py run ... --via IFACE`. The interface belongs to the process that created it (not shared); `oneqnode` creates its own TAP.
+- Bound to the address of an existing interface: `server/oneqnode.py run ... --via IFACE`. The interface belongs to the process that created it (not shared); `oneqnode` creates its own TAP.
 - Production: `deploy/oneqrelay.service`, `deploy/oneqnode@.service`, `deploy/nginx-oneqrelay.conf`, `deploy/oneqnode.env.example`.
 - oneq tests: `test_mesh_core.py`, `test_oneqrelay.py`, `test_oneqnode.py` (no root), `sudo python3 test_e2e_mesh.py` (real TAPs, 2 oneqrelay + 3 oneqnode in namespaces: direct, relay forced through federation, fallback + failover + recovery, accounts).
 
@@ -225,14 +225,14 @@ Educational project, **without an independent cryptographic audit**.
 Python linked against **OpenSSL ≥ 3.5** (`python3 -c "import ssl; print(ssl.OPENSSL_VERSION)"`), `/dev/net/tun`, `ip`.
 
 ```sh
-python3 -m venv /opt/oneq-src/venv && /opt/oneq-src/venv/bin/pip install -r requirements.txt
+python3 -m venv /opt/oneq-src/venv && /opt/oneq-src/venv/bin/pip install -r server/requirements.txt
 /opt/oneq-src/venv/bin/python -c "from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey"
 ```
 
 ## Keys and public key exchange
 
 ```sh
-oneqtunel.py genkey --key A.key          # writes A.key (0600) and A.key.pub (1216 B, base64); prints node_id
+server/oneqtunel.py genkey --key A.key          # writes A.key (0600) and A.key.pub (1216 B, base64); prints node_id
 ```
 
 Exchange the **`.pub` files** between the two nodes over a trusted channel. The rendezvous server is not trusted for identity, because the handshake authenticates nodes by their static keys. `node_id = SHA-256(public key)[:16]`. The node with the smaller public key is the initiator.
@@ -247,7 +247,7 @@ python3 rendezvous_server.py hash-token < net.token >> /etc/oneq-p2p/tokens.sha2
 Server with direct TLS (self-signed certificate or Let's Encrypt):
 
 ```sh
-rendezvous_server.py run --listen 0.0.0.0:8443 --cert fullchain.pem --key privkey.pem --tokens-file tokens.sha256
+server/rendezvous_server.py run --listen 0.0.0.0:8443 --cert fullchain.pem --key privkey.pem --tokens-file tokens.sha256
 ```
 
 In production, recommended behind nginx/Caddy (`deploy/`), with the server on `127.0.0.1:8080 --insecure-http --trust-proxy`.
@@ -256,7 +256,7 @@ In production, recommended behind nginx/Caddy (`deploy/`), with the server on `1
 
 ```sh
 # token from file (0600) or from environment (TUNSEC_TOKEN). Never from the command line.
-oneqtunel.py run --key A.key --peer B.key.pub --ifname pq0 --addr 10.99.0.1/24 \
+server/oneqtunel.py run --key A.key --peer B.key.pub --ifname pq0 --addr 10.99.0.1/24 \
    --listen 0.0.0.0:51820 --advertise 203.0.113.5:51820 \
    --rendezvous https://rv.example.org --token-file net.token [--cafile ca.pem] [--stun host:3478]
 ```

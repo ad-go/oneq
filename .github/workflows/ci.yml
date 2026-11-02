@@ -13,7 +13,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       # python-build-standalone: its OpenSSL must be >= 3.5 for the post-quantum TLS group that pqtls.py requires (checked below)
       - run: uv python install 3.13
-      - run: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt segno
+      - run: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r server/requirements.txt segno
       - name: OpenSSL of the interpreter
         run: .venv/bin/python -c "import ssl; print(ssl.OPENSSL_VERSION); assert ssl.OPENSSL_VERSION_INFO >= (3, 5)"
       - name: tests
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.13
-      - run: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt segno
+      - run: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r server/requirements.txt segno
       - run: sudo apt-get update && sudo apt-get install -y nftables iproute2
       - run: sudo .venv/bin/python test_e2e_mesh.py
       - run: sudo .venv/bin/python test_nat_sim.py

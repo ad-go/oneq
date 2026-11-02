@@ -14,7 +14,7 @@ Group=oneq-p2p
 EnvironmentFile=/etc/oneq-p2p/%i.env
 LoadCredential=key:/etc/oneq-p2p/%i.key
 LoadCredential=token:/etc/oneq-p2p/%i.token
-ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/oneqtunel.py run --key %d/key --token-file %d/token $ONEQ_P2P_ARGS
+ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/server/oneqtunel.py run --key %d/key --token-file %d/token $ONEQ_P2P_ARGS
 Restart=on-failure
 RestartSec=3
 

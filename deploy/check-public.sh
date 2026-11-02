@@ -1,6 +1,6 @@
 #!/bin/bash
 # Checks a relay from the outside: TCP/TLS (certificate matches the name and the private CA), /v1/health, and the UDP STUN service
-# (oneqnode nat-check). Usage: deploy/check-public.sh HOST PORT CA.pem      e.g.  deploy/check-public.sh x.example.org 8443 deploy/oneq-ca.crt
+# (oneqnode nat-check). Usage: deploy/check-public.sh HOST PORT CA.pem      e.g.  deploy/check-public.sh x.1q.ro 8443 deploy/oneq-ca.crt
 set -u
 HOST=${1:?host}; PORT=${2:-8443}; CA=${3:?CA certificate (PEM)}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,7 +21,7 @@ echo "$out" | grep -q '"stun"' && ok "the relay advertises its STUN ports" || fa
 
 echo "[3] UDP (STUN on $PORT, $((PORT+1)), $((PORT+2)))"
 if command -v oneqnode >/dev/null 2>&1; then NN=(oneqnode)
-elif [ -f "$HERE/oneqnode.py" ]; then NN=(python3 "$HERE/oneqnode.py")
+elif [ -f "$HERE/server/oneqnode.py" ]; then NN=(python3 "$HERE/server/oneqnode.py")
 else NN=(); fi
 if [ ${#NN[@]} -eq 0 ]; then
     echo "  (skipped: oneqnode not installed; run:  oneqnode nat-check $HOST:$PORT)"

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Admin page of oneqrelay: operator login, relay overview, federation peers, communities, users, nodes —
 and that changes replicate to the other relays of the federation."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

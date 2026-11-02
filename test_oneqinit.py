@@ -1,4 +1,8 @@
 """`oneqrelay init`: the directory it creates is complete, consistent and loadable by `oneqrelay run --config`."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import json
 import os
 import tempfile

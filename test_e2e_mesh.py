@@ -25,6 +25,7 @@ import unittest
 from test_e2e import make_cert, read_frames, sniff_main
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRV = os.path.join(HERE, "server")
 PY = sys.executable
 NODES, RELAYS = ("A", "B", "C"), ("R1", "R2")
 NS = {n: f"pq{n}" for n in NODES + RELAYS}
@@ -139,7 +140,7 @@ class TestMeshE2E(unittest.TestCase):
         cls.cert, cls.key = make_cert(cls.d, sorted({cls.addr[(r, o)] for r in RELAYS for o in NS if (r, o) in cls.addr}))
         cls.secret = os.path.join(cls.d, "fed.secret")
         with open(cls.secret, "w") as f:
-            f.write(subprocess.run([PY, os.path.join(HERE, "oneqrelay.py"), "gen-secret"], capture_output=True,
+            f.write(subprocess.run([PY, os.path.join(SRV, "oneqrelay.py"), "gen-secret"], capture_output=True,
                                    text=True, check=True).stdout)
         os.chmod(cls.secret, 0o600)
         cls.pwfile = {}
@@ -149,7 +150,7 @@ class TestMeshE2E(unittest.TestCase):
                 f.write(pw + "\n")
             os.chmod(cls.pwfile[u], 0o600)
         for n in NODES:
-            subprocess.run([PY, os.path.join(HERE, "oneqnode.py"), "genkey", "--key", os.path.join(cls.d, f"{n}.key")],
+            subprocess.run([PY, os.path.join(SRV, "oneqnode.py"), "genkey", "--key", os.path.join(cls.d, f"{n}.key")],
                            check=True, capture_output=True)
         cls.admin("community-add", "lan", "10.50.0.0/24", db="R1")
         cls.admin("user-add", "lan", "alice", "--role", "admin", "--password-file", cls.pwfile["alice"], db="R1")
@@ -159,14 +160,14 @@ class TestMeshE2E(unittest.TestCase):
 
     @classmethod
     def admin(cls, *args, db):
-        subprocess.run([PY, os.path.join(HERE, "oneqrelay.py"), "admin", "--db", os.path.join(cls.d, f"{db}.db"),
+        subprocess.run([PY, os.path.join(SRV, "oneqrelay.py"), "admin", "--db", os.path.join(cls.d, f"{db}.db"),
                         "--id", db.lower(), "--secret-file", cls.secret, *args], check=True, capture_output=True)
 
     @classmethod
     def start_relay(cls, r):
         other = "R2" if r == "R1" else "R1"
         cls.rp = getattr(cls, "rp", {})
-        cls.rp[r] = popen(PY, os.path.join(HERE, "oneqrelay.py"), "run", "--id", r.lower(), "--db",
+        cls.rp[r] = popen(PY, os.path.join(SRV, "oneqrelay.py"), "run", "--id", r.lower(), "--db",
                           os.path.join(cls.d, f"{r}.db"), "--secret-file", cls.secret, "--listen", "0.0.0.0:8443",
                           "--cert", cls.cert, "--key", cls.key, "--cafile", cls.cert, "--fed-peer",
                           f"https://{cls.addr[(other, r)]}:8443", ns=r, log=os.path.join(cls.d, f"{r}.log"))
@@ -215,7 +216,7 @@ class TestMeshE2E(unittest.TestCase):
         for n in NODES:
             user = (users or {}).get(n, "alice")
             self.logs[n] = os.path.join(self.d, f"{name}.{n}.log")
-            args = [PY, os.path.join(HERE, "oneqnode.py"), "run", "--key", os.path.join(self.d, f"{n}.key"),
+            args = [PY, os.path.join(SRV, "oneqnode.py"), "run", "--key", os.path.join(self.d, f"{n}.key"),
                     "--community", "lan", "--user", user, "--password-file", self.pwfile[user], "--name", n,
                     "--ifname", "oneq0", "--listen", "0.0.0.0:51820", "--cafile", self.cert, *extra]
             if os.environ.get("ONEQ_E2E_VERBOSE"):

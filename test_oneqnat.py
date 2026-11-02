@@ -1,6 +1,10 @@
 ﻿#!/usr/bin/env python3
 """NAT discovery: STUN codec and server (real UDP on loopback), NAT classification against modelled NAT behaviours,
 hole-punching rules, the relay API (nat field, reachability test) and a node measuring a relay's STUN service."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

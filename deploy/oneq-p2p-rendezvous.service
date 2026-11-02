@@ -8,7 +8,7 @@ Type=simple
 User=oneq-p2p-rv
 Group=oneq-p2p-rv
 # /etc/oneq-p2p/tokens.sha256: one SHA-256(token) per line (python3 rendezvous_server.py hash-token)
-ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/rendezvous_server.py run --listen 127.0.0.1:8080 --insecure-http --trust-proxy --tokens-file /etc/oneq-p2p/tokens.sha256
+ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/server/rendezvous_server.py run --listen 127.0.0.1:8080 --insecure-http --trust-proxy --tokens-file /etc/oneq-p2p/tokens.sha256
 Restart=on-failure
 RestartSec=3
 

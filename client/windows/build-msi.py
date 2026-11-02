@@ -19,7 +19,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 
 
 def project_version():
-    m = re.search(r'^VERSION = "([0-9.]+)"', open(os.path.join(ROOT, "oneqrelay.py"), encoding="utf-8").read(), re.M)
+    m = re.search(r'^VERSION = "([0-9.]+)"', open(os.path.join(ROOT, "server", "oneqrelay.py"), encoding="utf-8").read(), re.M)
     return m.group(1) if m else "0.0.0"
 
 

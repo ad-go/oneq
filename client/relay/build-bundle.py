@@ -27,8 +27,9 @@ TARGETS = {
 # the relay itself needs only aiohttp; cryptography is used by `oneqrelay init` (certificates). cryptography 50 has no wheel for Intel Macs.
 REQUIREMENTS = ["aiohttp==3.14.5", "cryptography>=50.0.2", "segno==1.6.1"]
 REQUIREMENTS_OVERRIDE = {"macos-x64": ["aiohttp==3.14.5", "cryptography>=46,<49", "segno==1.6.1"]}
-RELAY_FILES = ["oneqrelay.py", "oneqadmin.py", "oneqadmin.html", "oneqtotp.py", "oneqinit.py", "oneqnat.py", "oneqpop.py", "meshdb.py", "rendezvous_server.py",
-               "pqtls.py", "oneqconf.py", "pq_openssl.cnf", os.path.join("packaging", "relay-selftest.py")]
+RELAY_FILES = [os.path.join("server", f) for f in
+               ("oneqrelay.py", "oneqadmin.py", "oneqadmin.html", "oneqtotp.py", "oneqinit.py", "oneqnat.py", "oneqpop.py", "meshdb.py", "rendezvous_server.py",
+                "pqtls.py", "oneqconf.py", "pq_openssl.cnf")] + [os.path.join("packaging", "relay-selftest.py")]
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 

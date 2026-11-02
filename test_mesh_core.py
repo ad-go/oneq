@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the v2 wire protocol (meshproto) and the replicated registry (meshdb)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import base64

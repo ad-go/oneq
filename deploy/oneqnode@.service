@@ -14,7 +14,7 @@ Group=oneqnode
 EnvironmentFile=/etc/oneq/%i.env
 LoadCredential=key:/etc/oneq/%i.key
 LoadCredential=password:/etc/oneq/%i.password
-ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/oneqnode.py run --key %d/key --password-file %d/password --ifname %i $ONEQNODE_ARGS
+ExecStart=/opt/oneq-src/venv/bin/python /opt/oneq-src/server/oneqnode.py run --key %d/key --password-file %d/password --ifname %i $ONEQNODE_ARGS
 Restart=on-failure
 RestartSec=3
 

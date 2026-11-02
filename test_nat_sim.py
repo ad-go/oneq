@@ -24,6 +24,7 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRV = os.path.join(HERE, "server")
 PY = sys.executable
 RELAY_PORT = 18443
 RELAY_URL = f"http://192.0.2.1:{RELAY_PORT}"
@@ -67,14 +68,14 @@ class NatSim(unittest.TestCase):
         env = dict(os.environ, TUNMESH_PASSWORD="nat-sim-password")
         secret = os.path.join(cls.tmp, "secret")
         with open(secret, "w") as f:
-            f.write(subprocess.check_output([PY, f"{HERE}/oneqrelay.py", "gen-secret"], text=True))
+            f.write(subprocess.check_output([PY, f"{SRV}/oneqrelay.py", "gen-secret"], text=True))
         os.chmod(secret, 0o600)
-        base = [PY, f"{HERE}/oneqrelay.py", "admin", "--db", f"{cls.tmp}/r.db", "--id", "nat", "--secret-file", secret]
+        base = [PY, f"{SRV}/oneqrelay.py", "admin", "--db", f"{cls.tmp}/r.db", "--id", "nat", "--secret-file", secret]
         cls.admin_base = base
         subprocess.check_call(base + ["community-add", "lan", "10.50.0.0/24"])
         subprocess.check_call(base + ["user-add", "lan", "alice", "--max-nodes", "500"], env=env)
         cls.relay_log = open(f"{cls.tmp}/relay.log", "w")
-        cls.procs.append(subprocess.Popen([PY, f"{HERE}/oneqrelay.py", "run", "--db", f"{cls.tmp}/r.db", "--id", "nat", "--secret-file", secret,
+        cls.procs.append(subprocess.Popen([PY, f"{SRV}/oneqrelay.py", "run", "--db", f"{cls.tmp}/r.db", "--id", "nat", "--secret-file", secret,
                                            "--listen", f"192.0.2.1:{RELAY_PORT}", "--insecure-http"], stdout=cls.relay_log, stderr=cls.relay_log))
         for _ in range(50):
             if sh(f"curl -fs {RELAY_URL}/v1/health", check=False).returncode == 0:
@@ -196,7 +197,7 @@ table ip nat {{
 
     def check(self, kind):
         tag = kind.replace("-", "")
-        args = [PY, f"{HERE}/oneqnode.py", "nat-check", f"192.0.2.1:{RELAY_PORT}", "--json"]
+        args = [PY, f"{SRV}/oneqnode.py", "nat-check", f"192.0.2.1:{RELAY_PORT}", "--json"]
         if kind == "cone":
             args += ["--local-port", str(CONE_LOCAL)]
         r = ns(f"lan{tag}", *args, check=False)
@@ -214,8 +215,8 @@ table ip nat {{
             args = [RS, "up", "--relay", RELAY_URL, "--community", "lan", "--user", "alice", "--password-file", f"{self.tmp}/pw",
                     "--key-file", key, "--name", name, "--ifname", f"r{name}", "--relay-after", "12"]
         else:
-            sh([PY, f"{HERE}/oneqnode.py", "genkey", "--key", key])
-            args = [PY, f"{HERE}/oneqnode.py", "run", "--key", key, "--relay", RELAY_URL, "--community", "lan", "--user", "alice",
+            sh([PY, f"{SRV}/oneqnode.py", "genkey", "--key", key])
+            args = [PY, f"{SRV}/oneqnode.py", "run", "--key", key, "--relay", RELAY_URL, "--community", "lan", "--user", "alice",
                     "--password-file", f"{self.tmp}/pw", "--ifname", f"n{name}", "--name", name, "--relay-after", "12"]
         args += ["--listen", f"0.0.0.0:{CONE_LOCAL}"] if kind == "cone" else []
         args += list(extra)
@@ -286,7 +287,7 @@ table ip nat {{
             else:
                 time.sleep(settle / 2)
                 self.assertEqual((self.final_path(la, ip_b), self.final_path(lb, ip_a)), ("relay", "relay"))
-            r = ns(f"lan{kind_a.replace('-', '')}", PY, f"{HERE}/oneqping.py", ip_b, "3", check=False)      # works on either path
+            r = ns(f"lan{kind_a.replace('-', '')}", PY, f"{SRV}/oneqping.py", ip_b, "3", check=False)      # works on either path
             self.assertIn("3/3 ok", r.stdout, r.stdout + r.stderr + open(la).read()[-800:])
             return (self.nat_type(la), self.nat_type(lb))
         finally:
@@ -349,7 +350,7 @@ table ip nat {{
             ip_a, ip_b = self.own_ip(la), self.own_ip(lb)
             time.sleep(15)
             self.assertEqual((self.final_path(la, ip_b), self.final_path(lb, ip_a)), ("relay", "relay"))
-            r = ns("lansymmetric", PY, f"{HERE}/oneqping.py", ip_b, "3", check=False)
+            r = ns("lansymmetric", PY, f"{SRV}/oneqping.py", ip_b, "3", check=False)
             self.assertIn("3/3 ok", r.stdout, r.stdout + r.stderr)
         finally:
             for p in (a, b):
@@ -371,7 +372,7 @@ table ip nat {{
             ip_a, ip_b = self.own_ip(la), self.own_ip(lb)
             time.sleep(15)
             self.assertEqual((self.final_path(la, ip_b), self.final_path(lb, ip_a)), ("relay", "relay"))
-            r = ns("lansymmetric", PY, f"{HERE}/oneqping.py", ip_b, "3", check=False)
+            r = ns("lansymmetric", PY, f"{SRV}/oneqping.py", ip_b, "3", check=False)
             self.assertIn("3/3 ok", r.stdout, r.stdout + r.stderr)
         finally:
             for p in (a, b):
@@ -423,11 +424,11 @@ table ip nat {{
             # the members learn from the registry which delegated nodes each of them holds a session with; traffic keeps flowing until
             # both directions run through the delegated node
             def through_the_node():
-                rr = ns("lansymmetric", PY, f"{HERE}/oneqping.py", ip_b, "3", check=False)
+                rr = ns("lansymmetric", PY, f"{SRV}/oneqping.py", ip_b, "3", check=False)
                 assert "3/3 ok" in rr.stdout, rr.stdout + rr.stderr
                 return impl_a != "py" or any("goes through the relay node" in l for l in self.lines(la))
             self.until(through_the_node, 90, "traffic from A to B through the delegated node")
-            rr = ns("lansymmetric", PY, f"{HERE}/oneqping.py", ip_b, "5", check=False)
+            rr = ns("lansymmetric", PY, f"{SRV}/oneqping.py", ip_b, "5", check=False)
             self.assertIn("5/5 ok", rr.stdout, rr.stdout + rr.stderr + open(la).read()[-1500:])
             return la, lb, lr
         finally:

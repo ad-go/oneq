@@ -7,10 +7,10 @@ import sys
 import time
 
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "server"))
 import oneqportmap as pm
 
-SERIAL = "CHANGE_ME"   # your phone's adb serial ("adb devices")
+SERIAL = "HYF4C18B08001134"   # the phone used on 2026-10-24: change it (adb devices)
 PORT = 47321
 LOG = []
 

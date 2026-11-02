@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Federated oneqrelay tests: three oneqrelays in one process, replicated state, login/lock-out,
 node registration with automatic addresses, relay (local and across oneqrelays), federation auth."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import asyncio

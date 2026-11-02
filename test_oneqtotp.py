@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Second factor of the admin page: TOTP against the RFC 6238 test vectors, replay protection, recovery codes, the login flow with an
 authenticator code, the address allow-list, and the refusal to start the admin page unprotected."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server"))
 import pqtls  # noqa: F401
 
 import base64
@@ -20,6 +24,7 @@ import oneqtotp as tp
 from test_oneqadmin import ADMIN_PW, AdminFed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRV = os.path.join(HERE, "server")
 RFC_SECRET = base64.b32encode(b"12345678901234567890").decode().rstrip("=")      # the SHA-1 test secret of RFC 6238, appendix B
 
 
@@ -220,7 +225,7 @@ class TestAdminAddressAllowList(AdminFed):
 
 class TestCli(unittest.TestCase):
     def run_cli(self, *args, **kw):
-        return subprocess.run([sys.executable, os.path.join(HERE, "oneqrelay.py"), *args], capture_output=True, text=True, **kw)
+        return subprocess.run([sys.executable, os.path.join(SRV, "oneqrelay.py"), *args], capture_output=True, text=True, **kw)
 
     def test_admin_totp_command_writes_a_private_file_and_shows_the_enrolment(self):
         d = tempfile.mkdtemp()
