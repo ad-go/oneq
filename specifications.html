@@ -55,7 +55,7 @@ footer { margin-top: 3em; color: var(--muted); font-size: .85rem; border-top: 1p
 
 <header>
   <h1>tunmesh-pq/v2</h1>
-  <p>Wire protocol specification for the oneq mesh network: message formats, key derivation, transcript, threat model, and the limits of the guarantees.</p>
+  <p>Wire protocol specification for the oneq network: message formats, key derivation, transcript, threat model, and the limits of the guarantees.</p>
 </header>
 
 <div class="bad">
@@ -505,7 +505,7 @@ footer { margin-top: 3em; color: var(--muted); font-size: .85rem; border-top: 1p
 <ul>
   <li><strong>No negotiation</strong> of version or algorithms: a format change means a new <code>LABEL</code> and new types; v1 and v2 nodes do not interoperate. There is no mechanism for gradually migrating a network between versions.</li>
   <li>The handshake zero-nonce is safe only because <code>k1</code> and <code>k2</code> are each used once; any protocol modification that would reuse these keys would break security.</li>
-  <li>Full mesh: n² sessions; designed for tens of nodes.</li>
+  <li>Full topology: n² sessions; designed for tens of nodes.</li>
 </ul>
 
 <h3>12.9 Process guarantees</h3>

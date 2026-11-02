@@ -1,4 +1,4 @@
-# Mesh network architecture (oneqrelay + oneqnode)
+# oneq network architecture (oneqrelay + oneqnode)
 
 Educational project, **without an independent cryptographic audit**.
 
@@ -55,7 +55,7 @@ The data plane goes directly between nodes (UDP, with hole punching) or, if not 
 
 ## Data plane (L2)
 
-- Each node maintains sessions with all members (full mesh; small networks). Initiator: the node with the smaller public key.
+- Each node maintains sessions with all members (full topology; small networks). Initiator: the node with the smaller public key.
 - **Switching:** unicast to a known MAC goes to a single peer; broadcast, multicast and unknown unicast are sent to all. Registered MACs are static; MACs behind a node (bridge) are learned from received frames and expire after 5 min. A member cannot use another member's MAC (the frame is dropped). No transit: a frame received from a peer is not forwarded to another, so no loops.
 - **Paths:** direct (UDP) preferred. Each node stays **attached at all times** to a oneqrelay (WebSocket), so it can always be reached via relay; otherwise a peer sending via relay to a node with a direct session would lose packets. The handshake also goes through the relay for a peer with no direct session after 10 s, and data goes through the relay when the direct path becomes inactive (75 s without packets). On the relay, a probe every 20 s tries the direct path and switches back automatically.
 
@@ -77,7 +77,7 @@ The client API, the relay and the federation run on TLS 1.3 with **only** X25519
 
 ## Known limitations
 
-- Full mesh (n² sessions): designed for tens of nodes, not thousands.
+- Full topology (n² sessions): designed for tens of nodes, not thousands.
 - No admin approval for members (any valid account with quota can add nodes).
 - Replication is "eventually consistent": after a change, a password change or a revocation may take a few seconds to reach another oneqrelay (tokens already verified there remain valid until synchronization).
 - SQLite databases are not encrypted; the file contains password hashes.
@@ -96,15 +96,15 @@ An administrator can announce a private network (e.g. `192.168.16.0/24`) as acce
 `{"via": "<node id>"}` or the "Routes" section on the admin page. The registry keeps `route` records (`<comm>/<network>_<prefix>` → `{cidr, via, by}`), replicated like all others; the member list (`GET /nodes`) includes them as `routes`.
 A route disappears when the gateway node disappears. Rules: IPv4, prefix at least /8, does not overlap the community subnet, not loopback/multicast/link-local, at most 64 per community.
 
-The Rust client with `--accept-routes` (default off) accepts only **private** networks (RFC 1918 and 100.64/10) outside the mesh, regardless of what the relay announces: a relay is trusted for membership, not for routing your traffic.
-`l3.rs` sends the IP packet to the gateway's MAC (longest prefix match; the packet stays unchanged, only the frame has a different MAC), and `routes_os.rs` installs the route in the system on the TUN interface (`netsh` / `ip` / `route`) and removes it when it is withdrawn or the node stops. Responses come as normal packets to our mesh address. The gateway is an ordinary node with `ip_forward` and NAT (`deploy/oneq-gateway`): without NAT, hosts in the network don't know how to reply to 10.78.0.0/24.
-The script only allows the announced network (`FORWARD ... DROP` for the rest) and corrects the MSS (the mesh MTU is smaller).
+The Rust client with `--accept-routes` (default off) accepts only **private** networks (RFC 1918 and 100.64/10) outside the oneq network, regardless of what the relay announces: a relay is trusted for membership, not for routing your traffic.
+`l3.rs` sends the IP packet to the gateway's MAC (longest prefix match; the packet stays unchanged, only the frame has a different MAC), and `routes_os.rs` installs the route in the system on the TUN interface (`netsh` / `ip` / `route`) and removes it when it is withdrawn or the node stops. Responses come as normal packets to our address in the oneq network. The gateway is an ordinary node with `ip_forward` and NAT (`deploy/oneq-gateway`): without NAT, hosts in the network don't know how to reply to 10.78.0.0/24.
+The script only allows the announced network (`FORWARD ... DROP` for the rest) and corrects the MSS (the oneq network MTU is smaller).
 
 **Redundancy.** The same network can be announced through up to 4 gateways (`route-add ... --prio N`, smaller = preferred; one `route` record per network + gateway pair, key `<comm>/<network>_<prefix>/<node id>`).
 The client chooses, for each network, the gateway with the best priority **among those that respond** (`l3.rs`: session established and a packet received in the last 45 s; not registry presence, which expires only at 90 s),
 stays on it as long as it responds (no automatic fallback to the preferred one, to avoid moving connections that pass through its NAT) and switches to the next when it goes silent; if none responds, it tries the preferred one again.
 The system route (`routes_os.rs`) points to the preferred gateway (next hop doesn't matter: the L3 adapter puts the MAC by destination address); status shows the preferred gateway and backups.
-Limitations: a gateway alive in the mesh but without access to the network is not detected, no load sharing, on Android networks are added to the VpnService interface (rebuilt when the list changes), Python TAP nodes don't install routes, a Rust client cannot be a gateway.
+Limitations: a gateway alive in the oneq network but without access to the network is not detected, no load sharing, on Android networks are added to the VpnService interface (rebuilt when the list changes), Python TAP nodes don't install routes, a Rust client cannot be a gateway.
 
 ## Delegated relay nodes (L1)
 

@@ -25,21 +25,46 @@ Compatibility rules are listed per release.
   shown exactly as in the API mode (Rust client). Previously, SVC mode showed only the local IP. The relay token is
   cached in memory and refreshed as needed. Prerequisite: the user running the GUI must be in the `oneqnode` group
   (`usermod -aG oneqnode <user>`; `chmod 640 /etc/oneq/node-mesh.password`).
+* **Exit node**: any member can be marked an exit node (`oneqrelay admin` / relay API); a client pointed at one
+  (`exit_node` in the configuration, or the UI's radio buttons in the members list) gets two `/1` routes
+  (`0.0.0.0/1`, `128.0.0.0/1`, covering all of IPv4) installed on its TUN interface pointing at that peer, plus
+  `/32` host-route exceptions for the relay addresses so the control connection survives the broad routes
+  (`routes_os.rs`: new `ExitKeeper`, `netsh` / `ip` / `route`). The client can also auto-select the best exit node
+  by measured per-peer round-trip time. Windows-specific fixes: the loop-prevention guard (below) was treating the
+  two `/1` routes as already "local" on every machine with an ordinary private address, so they were never
+  installed at all; and the relay-exception install used `netsh ... interface=*`, which is invalid syntax on
+  Windows (a real interface index is required) and silently dropped the relay's own `/32` exceptions, breaking
+  the control connection as soon as the exit node's routes went up.
+* **Routing loop prevention**: a route is skipped if it is already covered by one of the node's own local
+  addresses, to avoid an announced network accidentally routing back through itself.
+* **Native desktop UIs**: macOS gets a native AppKit app (`client/macos/onequi.swift`) replacing the WKWebView
+  window — status, members, exit-node radio buttons — ad-hoc signed, no Apple account needed. Linux gets a GTK3
+  Python client (`client/linux/oneq-gui.py`) with the same layout as the Flutter app (main view and settings,
+  settings export/import, service control), detecting and attaching to an already-running `oneqnode`/`oneqclient`
+  service instead of starting a second node.
+* **Relay admin page**: settings download for a user (`GET /admin/api/c/<comm>/users/<u>/settings`, same JSON the
+  clients import), a root-path redirect to `/admin/`, and `oneqrelay admin rename-user`.
+* **Deploy**: an nginx configuration for running `oneqrelay` alongside another application in the same container
+  (`deploy/nginx-relay-app.conf`), and a standalone Let's Encrypt certificate lifecycle script using `acme.sh`
+  (`deploy/tls/oneq-cert.sh`, with a daily systemd timer) for relays that terminate TLS themselves.
+* **CI**: fuzzing targets (handshake, transport, fragments, frames, registry JSON) run under `cargo-fuzz` in
+  GitHub Actions, and `cargo audit` / `cargo deny` check the Rust dependency tree (advisories, licenses, sources)
+  on every push.
 
 * **Redundant gateways**: the same network can be announced through up to 4 gateway nodes (`oneqrelay admin route-add COMMUNITY NETWORK NODE --prio N`, lower is preferred, default 100; `route-del COMMUNITY NETWORK [NODE]`;
   `PUT {via, prio}` and `DELETE ...?via=` in the API; the admin page lists one line per gateway with its priority). The record key now carries the gateway (`<comm>/<network>_<prefix>/<node id>`); records of the earlier
   shape are still read and are rewritten when the same gateway is announced again. The client uses the best gateway **that answers** (session up and a packet from it within 45 s, not the registry's 90 s presence), stays on it
   while it answers (no switch back, so connections through its NAT are not moved for nothing) and takes the next one when it goes silent; with nobody answering it keeps trying the preferred one.
   Measured with m (priority 100) and n (200) as gateways, from the Windows client: stopping m moved the traffic to n after 45 s of loss, stopping n later moved it back to m after about 25 s; m coming back did not pull the traffic away from n.
-  Not covered: a gateway that is alive in the mesh but has lost its own uplink (nothing detects that), load sharing between gateways, and the older clients (they take the first gateway of the list).
+  Not covered: a gateway that is alive in the oneq network but has lost its own uplink (nothing detects that), load sharing between gateways, and the older clients (they take the first gateway of the list).
 * **A community can move to another subnet**: `oneqrelay admin community-subnet COMMUNITY 10.10.10.0/24` gives every node a new address in it (MAC addresses, keys, users and routes stay; refused when the new subnet is too small
   or swallows a route); the nodes take the new address when they register again (restart them). Done on the test federation: 10.78.0.0/24 -> 10.10.10.0/24, all seven nodes re-addressed with the same last octet, the gateway rules moved with it.
 * **Routes through a gateway member** (a private network behind a node, reachable transparently from the other members): an administrator announces `192.168.16.0/24` as reachable through a node
   (`oneqrelay admin route-add COMMUNITY NETWORK NODE` / `route-del`, `PUT|DELETE /v1/c/<comm>/routes/<a.b.c.d_len>`, a "Routes" section on the admin page; record kind `route`, replicated; the member list carries `routes`;
-  a route goes away with its gateway node; at most 64 per community, /8 or longer, never the mesh subnet, loopback, multicast or link-local). The Rust client with `--accept-routes` (`accept_routes` in the service
+  a route goes away with its gateway node; at most 64 per community, /8 or longer, never the oneq subnet, loopback, multicast or link-local). The Rust client with `--accept-routes` (`accept_routes` in the service
   configuration; off by default) sends packets for such a network to the gateway's MAC address (`l3.rs`, longest prefix wins) and installs the route on its TUN interface (`routes_os.rs`: `netsh`, `ip`, `route`; removed when
-  withdrawn and when the node stops). Only private networks (RFC 1918, 100.64/10) outside the mesh are accepted by the client, whatever the relay announces. The gateway is an ordinary node with `ip_forward` and NAT:
-  `deploy/oneq-gateway` + `oneq-gateway.service` (NAT only for the announced network, nothing else is forwarded out of the mesh). Tested end to end: PC (Windows service) -> m (gateway) -> 192.168.16.0/24 (ping, TCP 80/443, `tracert`), route withdrawn and restored from the relay (about 6 s), route removed when the service stops.
+  withdrawn and when the node stops). Only private networks (RFC 1918, 100.64/10) outside the oneq network are accepted by the client, whatever the relay announces. The gateway is an ordinary node with `ip_forward` and NAT:
+  `deploy/oneq-gateway` + `oneq-gateway.service` (NAT only for the announced network, nothing else is forwarded out of the oneq network). Tested end to end: PC (Windows service) -> m (gateway) -> 192.168.16.0/24 (ping, TCP 80/443, `tracert`), route withdrawn and restored from the relay (about 6 s), route removed when the service stops.
   Not done: Android (the VpnService must add the route), Python TAP nodes as clients (they ignore routes), a gateway that is a Rust client (it does not forward), failover between two gateways. Relays older than this change ignore the new record kind: update the whole federation first.
 * Debian packages rebuilt under the oneq names on Debian 13 (`oneqnode`, `oneqrelay`, `oneq-server`; `oneqrelay` now bundles `cryptography`, both ship `oneqpop.py`, the node also `oneqportmap.py`); the apt repository `ad-go/oneq-apt` carries them, signed with the same archive key (fingerprint unchanged, user id renamed to "oneq apt repository"); the npn packages are gone from it.
 * Admin page: the second factor is mandatory from every network. The `admin_no_2fa_from` / `admin_no_2fa` settings were removed (a relay that has them in its configuration refuses to start: delete the lines); the relay does not start the page without `admin_totp_file`. Off by default.

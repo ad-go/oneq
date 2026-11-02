@@ -6,7 +6,7 @@ English version of the section "Dovada de posesie a cheii nodului" of `README.md
 
 A `node_id` is `SHA-256(public key)[:16]`, and public keys are public (the member list shows them). The relay and the rendezvous server are not trusted for identity
 (the handshake authenticates nodes by their static keys). Without a proof, a registration is accepted whenever its key matches the id, so anybody holding a token (point-to-point mode) or an
-account (mesh) can register somebody else's public key with endpoints of its own, or register an id before its owner and lock the owner out. Data stays protected by the
+account (oneq network) can register somebody else's public key with endpoints of its own, or register an id before its owner and lock the owner out. Data stays protected by the
 handshake, so the harm is a denial of service, not a confidentiality break.
 
 ## The proof
@@ -44,7 +44,7 @@ Switches: `oneqrelay --require-pop` / `require_pop = yes` in `relay.conf`; `rend
 
 ## Tests
 
-`test_oneqpop.py` (21 tests): the codec (only the key holder answers, tampering with any field, other server keys, expiry, garbage), the mesh relay (downgrade protection, other node's proof, federation,
+`test_oneqpop.py` (21 tests): the codec (only the key holder answers, tampering with any field, other server keys, expiry, garbage), the oneq relay (downgrade protection, other node's proof, federation,
 squatting a known public key, `require_pop`, nodes without the feature, reset by deleting), the Python node client (cache, expiry retry, relay without the feature, imposter) and the point-to-point rendezvous server
 (overwrite, clients and servers without the feature, `require_pop`, relay slot, the relay client sending the proof by itself). Rust: unit test of `Identity::pop_answer` (`wire.rs`); the Rust and the Python
 implementations answer each other's challenges.

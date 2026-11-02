@@ -1,8 +1,8 @@
-# Post-quantum VPN: mesh oneqrelay/oneqnode and point-to-point oneqtunel
+# Post-quantum VPN: oneq network (oneqrelay/oneqnode) and point-to-point oneqtunel
 
 # Two modes of operation
 
-1. **L2 mesh network with users and passwords (recommended):** `oneqrelay` (federated servers) + `oneqnode` (L2/TAP nodes), IP/MAC allocated automatically. Full description: [ARCHITECTURE.md](ARCHITECTURE.md). Formal wire protocol specification (formats, keys, transcript, threat model, what is not guaranteed): [specifications.html](specifications.html), verified with `spec_check.py`.
+1. **L2 oneq network with users and passwords (recommended):** `oneqrelay` (federated servers) + `oneqnode` (L2/TAP nodes), IP/MAC allocated automatically. Full description: [ARCHITECTURE.md](ARCHITECTURE.md). Formal wire protocol specification (formats, keys, transcript, threat model, what is not guaranteed): [specifications.html](specifications.html), verified with `spec_check.py`.
 2. **Point-to-point (`oneqtunel.py`):** an L3 tunnel between two nodes with manually exchanged keys; see the sections below.
 
 Installing clients (Windows, macOS, Debian, Android), with command examples: [client/README.md](client/README.md#installing-a-client-examples).
@@ -28,7 +28,7 @@ sudo oneqnode-init lan --relay https://r1.example.org --community lan --user ali
 Services start under systemd or supervisord (auto-detected, or `init =` in the config file). Build: `packaging/build-debs.sh`; signed repository: `packaging/make-repo.sh` + `packaging/sign-repo.sh`; tests: `packaging/{smoke,service,repo}-test.sh`.
 The signed apt repository is in Gitea, `ad-go/oneq-apt` (0.0.1, trixie/amd64; key `oneq-archive-keyring.gpg`, fingerprint `4C33 A0A0 1EC9 798B 53EE 638D 1F87 9861 4F16 22ED`); `oneq.sources` contains a placeholder URL (`https://apt.example.org/oneq`) until the directory is served by a web server.
 
-## Mesh network: quick start
+## oneq network: quick start
 
 ```sh
 # 1. Same federation secret on all oneqrelay instances
@@ -54,7 +54,7 @@ oneqnode.py run --key node.key --relay https://r1.example.org:8443 --relay https
   and picks it up on restart; rejected if the new subnet is too small or overlaps a route.
 - Bound to the address of an existing interface: `oneqnode.py run ... --via IFACE`. The interface belongs to the process that created it (not shared); `oneqnode` creates its own TAP.
 - Production: `deploy/oneqrelay.service`, `deploy/oneqnode@.service`, `deploy/nginx-oneqrelay.conf`, `deploy/oneqnode.env.example`.
-- Mesh tests: `test_mesh_core.py`, `test_oneqrelay.py`, `test_oneqnode.py` (no root), `sudo python3 test_e2e_mesh.py` (real TAPs, 2 oneqrelay + 3 oneqnode in namespaces: direct, relay forced through federation, fallback + failover + recovery, accounts).
+- oneq tests: `test_mesh_core.py`, `test_oneqrelay.py`, `test_oneqnode.py` (no root), `sudo python3 test_e2e_mesh.py` (real TAPs, 2 oneqrelay + 3 oneqnode in namespaces: direct, relay forced through federation, fallback + failover + recovery, accounts).
 
 ---
 
@@ -73,8 +73,8 @@ A private network behind a member (e.g. `192.168.16.0/24`) can be made transpare
     oneqrelay admin route-del COMMUNITY 192.168.16.0/24 [NODE]                 # one gateway, or all
 
 The same network can have up to 4 gateways (redundancy): the client uses the one with the best priority among those that respond, and switches to the next when it goes silent, without switching back automatically.
-The gateway is an ordinary node with `ip_forward` and NAT (`deploy/oneq-gateway`, `deploy/oneq-gateway.service`: only the announced network exits the mesh). Rust clients receive routes with `--accept-routes`
-(`accept_routes` in the service configuration, off by default) and accept only private networks outside the mesh. Details: ARCHITECTURE.md, `client/README.md`.
+The gateway is an ordinary node with `ip_forward` and NAT (`deploy/oneq-gateway`, `deploy/oneq-gateway.service`: only the announced network exits the oneq network). Rust clients receive routes with `--accept-routes`
+(`accept_routes` in the service configuration, off by default) and accept only private networks outside the oneq network. Details: ARCHITECTURE.md, `client/README.md`.
 
 ## Relay on Windows and macOS
 
@@ -123,7 +123,7 @@ strict CSP with no external resources, every change is logged with the client ad
 *English version: [POP.md](POP.md).*
 
 `node_id` is the hash of the public key, and public keys are not secret (the member list shows them). Without a proof, anyone with a token (point-to-point mode) or an account
-(mesh) could register someone else's key with their own addresses or could claim a `node_id` before its owner. Node keys are KEM keys (X25519 + ML-KEM-768), not signing keys,
+(oneq network) could register someone else's key with their own addresses or could claim a `node_id` before its owner. Node keys are KEM keys (X25519 + ML-KEM-768), not signing keys,
 so the proof is a **challenge** that only the holder of the private key can open (`oneqpop.py`):
 
 1. The node sends `POST /v1/c/<community>/nodes/<id>/challenge` (point-to-point mode: `POST /v1/nodes/<id>/challenge`) with the public key.
@@ -320,7 +320,7 @@ sudo python3 test_e2e.py         # 2 real TUNs in namespaces: direct, forced rel
 - **Node key proof of possession** (see section above, [POP.md](POP.md) in English): prevents a token/account holder who does not have the private key from claiming a `node_id`.
   Does not protect against a compromised relay (which can delete a node and allocate its address to another key) or against an account holder who also has the key. Without
   `--require-pop`, a node that does not provide proof is accepted and its slot can be taken.
-- One peer per node (point-to-point mode); for multiple peers use the mesh mode.
+- One peer per node (point-to-point mode); for multiple peers use the oneq mode.
 - Port prediction guesses (see "Nodes behind NAT"); a NAT with random ports, a CGNAT with public addresses and a symmetric NAT without a constant step stay on relay.
 
 ## Update check
