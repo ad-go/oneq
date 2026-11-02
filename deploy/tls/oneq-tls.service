@@ -1,0 +1,10 @@
+[Unit]
+Description=oneq TLS certificate renewal
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/oneq/tls/oneq-cert.sh renew
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,24 @@
+Package: oneqnode
+Version: @VERSION@
+Architecture: amd64
+Maintainer: oneq <k@1q.ro>
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.13), python3 (<< 3.14), libssl3t64 (>= 3.5), iproute2, adduser, util-linux
+Suggests: oneqrelay, supervisor
+Section: net
+Priority: optional
+Description: node of the oneq post-quantum layer-2 mesh (virtual Ethernet)
+ oneqnode joins a community hosted by one or more oneqrelay servers. It logs
+ in with a user name and password, receives an IP and a MAC address
+ automatically, and opens end-to-end sessions with every other member:
+ directly over UDP (with hole punching) or through the relay when that
+ fails. Ethernet frames are switched between a TAP interface and the
+ sessions, so the community behaves like one LAN.
+ .
+ Sessions use a hybrid X25519 + ML-KEM-768 handshake and
+ ChaCha20-Poly1305. Several oneqrelay servers can be configured for
+ failover; established sessions keep working when all of them are down.
+ .
+ Installed in /opt/oneq/node, configured by /etc/oneq/node.conf. Runs under systemd or supervisord. Needs Python 3.13 linked against OpenSSL 3.5 or newer (Debian 13). The
+ Python libraries it uses are bundled in /opt/oneq/node/site-packages.
+ This is an educational project without an independent security audit.

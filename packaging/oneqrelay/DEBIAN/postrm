@@ -1,0 +1,42 @@
+#!/bin/sh
+set -e
+
+drop_supervisor_program() {
+    if [ -f /etc/supervisor/conf.d/oneqrelay.conf ]; then
+        rm -f /etc/supervisor/conf.d/oneqrelay.conf
+        if command -v supervisorctl >/dev/null 2>&1; then
+            supervisorctl reread >/dev/null 2>&1 || true
+            supervisorctl update >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+case "$1" in
+remove)
+    if [ -d /run/systemd/system ]; then
+        systemctl disable oneqrelay.service >/dev/null 2>&1 || true
+        systemctl daemon-reload || true
+    fi
+    drop_supervisor_program
+    ;;
+purge)
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+    drop_supervisor_program
+    # The registry (accounts, nodes), the federation secret and the logs go away only on purge.
+    rm -f /etc/oneq/relay.conf /etc/oneq/relay.secret
+    rm -rf /var/lib/oneq/relay
+    rm -f /var/log/oneq/relay.log*
+    # /etc/oneq, /var/lib/oneq, /var/log/oneq are shared with oneqnode: removed only when nothing else is in them.
+    rmdir /etc/oneq /var/lib/oneq /var/log/oneq 2>/dev/null || true
+    if getent passwd oneqrelay >/dev/null; then
+        deluser --system --quiet oneqrelay >/dev/null 2>&1 || true
+    fi
+    if getent group oneqrelay >/dev/null; then
+        delgroup --system --quiet oneqrelay >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

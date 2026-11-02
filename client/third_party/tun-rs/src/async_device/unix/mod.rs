@@ -1,0 +1,432 @@
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use crate::platform::offload::{handle_gro, VirtioNetHdr, VIRTIO_NET_HDR_LEN};
+use crate::platform::DeviceImpl;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use crate::platform::GROTable;
+use crate::SyncDevice;
+use std::io;
+use std::io::{IoSlice, IoSliceMut};
+use std::ops::Deref;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+
+/// Descriptor and waker helpers shared by the readiness tests.
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(feature = "async_tokio", feature = "async_io")
+))]
+mod test_util;
+/// Readiness tests for the tokio backend.
+#[cfg(all(test, feature = "async_tokio", target_os = "linux"))]
+mod tests;
+/// Readiness tests for the async-io backend.
+#[cfg(all(
+    test,
+    feature = "async_io",
+    not(feature = "async_tokio"),
+    target_os = "linux"
+))]
+mod tests_async_io;
+#[cfg(feature = "async_tokio")]
+mod tokio;
+#[cfg(feature = "async_tokio")]
+pub use self::tokio::AsyncDevice;
+
+#[cfg(all(feature = "async_io", not(feature = "async_tokio")))]
+mod async_io;
+#[cfg(all(feature = "async_io", not(feature = "async_tokio")))]
+pub use self::async_io::AsyncDevice;
+
+impl FromRawFd for AsyncDevice {
+    /// # Safety
+    /// The fd must be valid, open, and refer to a TUN/TAP device.
+    /// On Linux, it must use `IFF_NO_PI` framing and must not use `IFF_VNET_HDR`.
+    ///
+    /// # Panics
+    /// Panics if the descriptor is invalid or violates the platform-specific adoption contract.
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        // SAFETY: FromRawFd transfers ownership of a valid open descriptor to this object.
+        unsafe { AsyncDevice::from_fd(fd) }.expect("failed to adopt TUN/TAP file descriptor")
+    }
+}
+impl IntoRawFd for AsyncDevice {
+    fn into_raw_fd(self) -> RawFd {
+        self.into_fd().unwrap()
+    }
+}
+impl AsRawFd for AsyncDevice {
+    fn as_raw_fd(&self) -> RawFd {
+        self.get_ref().as_raw_fd()
+    }
+}
+
+impl Deref for AsyncDevice {
+    type Target = DeviceImpl;
+
+    fn deref(&self) -> &Self::Target {
+        self.get_ref()
+    }
+}
+
+impl AsyncDevice {
+    #[allow(dead_code)]
+    pub fn new(device: SyncDevice) -> io::Result<AsyncDevice> {
+        AsyncDevice::new_dev(device.0)
+    }
+
+    /// # Safety
+    /// The fd must be valid, open, and refer to a TUN/TAP device.
+    /// On Linux, it must use `IFF_NO_PI` framing and must not use `IFF_VNET_HDR`.
+    /// Construct an AsyncDevice from an existing file descriptor.
+    pub unsafe fn from_fd(fd: RawFd) -> io::Result<AsyncDevice> {
+        // SAFETY: from_fd forwards its documented ownership and descriptor-validity contract.
+        AsyncDevice::new_dev(unsafe { DeviceImpl::from_fd(fd)? })
+    }
+
+    /// # Safety
+    /// The fd passed in must be a valid, open file descriptor.
+    /// On Linux, it must use `IFF_NO_PI` framing and must not use `IFF_VNET_HDR`.
+    /// Unlike [`from_fd`], this function does **not** take ownership of `fd`,
+    /// and therefore will not close it when dropped.  
+    /// The caller is responsible for ensuring the lifetime and eventual closure of `fd`.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn borrow_raw(fd: RawFd) -> io::Result<Self> {
+        // SAFETY: borrow_raw forwards its documented borrowed-descriptor lifetime contract.
+        AsyncDevice::new_dev(unsafe { DeviceImpl::borrow_raw(fd)? })
+    }
+
+    pub fn into_fd(self) -> io::Result<RawFd> {
+        Ok(self.into_device()?.into_raw_fd())
+    }
+    /// Waits for the device to become readable.
+    ///
+    /// This function is usually paired with `try_recv()` for manual readiness-based I/O.
+    ///
+    /// The function may complete without the device being readable. This is a
+    /// false-positive and attempting a `try_recv()` will return with
+    /// `io::ErrorKind::WouldBlock`.
+    ///
+    /// On Linux with the tokio backend this also completes when the kernel
+    /// reports an error condition for the device (for example the interface
+    /// was deleted with `ip link del`); the following `try_recv()` then
+    /// returns that error instead of `WouldBlock`.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. Once a readiness event occurs, the method
+    /// will continue to return immediately until the readiness event is
+    /// consumed by an attempt to read that fails with `WouldBlock` or
+    /// `Poll::Pending`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(unix, any(feature = "async_io", feature = "async_tokio")))]
+    /// # async fn example() -> std::io::Result<()> {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_async()?;
+    ///
+    /// // Wait for the device to be readable
+    /// dev.readable().await?;
+    ///
+    /// // Try to read (may still return WouldBlock)
+    /// let mut buf = vec![0u8; 1500];
+    /// match dev.try_recv(&mut buf) {
+    ///     Ok(n) => println!("Read {} bytes", n),
+    ///     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+    ///         println!("False positive readiness");
+    ///     }
+    ///     Err(e) => return Err(e),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn readable(&self) -> io::Result<()> {
+        self.wait_readable().await
+    }
+    /// Waits for the device to become writable.
+    ///
+    /// This function is usually paired with `try_send()` for manual readiness-based I/O.
+    ///
+    /// The function may complete without the device being writable. This is a
+    /// false-positive and attempting a `try_send()` will return with
+    /// `io::ErrorKind::WouldBlock`.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. Once a readiness event occurs, the method
+    /// will continue to return immediately until the readiness event is
+    /// consumed by an attempt to write that fails with `WouldBlock` or
+    /// `Poll::Pending`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(all(unix, any(feature = "async_io", feature = "async_tokio")))]
+    /// # async fn example() -> std::io::Result<()> {
+    /// use tun_rs::DeviceBuilder;
+    ///
+    /// let dev = DeviceBuilder::new()
+    ///     .ipv4("10.0.0.1", 24, None)
+    ///     .build_async()?;
+    ///
+    /// // Prepare a packet
+    /// let packet = b"Hello, TUN!";
+    ///
+    /// // Wait for the device to be writable
+    /// dev.writable().await?;
+    ///
+    /// // Try to send (may still return WouldBlock)
+    /// match dev.try_send(packet) {
+    ///     Ok(n) => println!("Sent {} bytes", n),
+    ///     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+    ///         println!("False positive writability");
+    ///     }
+    ///     Err(e) => return Err(e),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn writable(&self) -> io::Result<()> {
+        self.0.writable().await.map(|_| ())
+    }
+    /// Receives a single packet from the device.
+    /// On success, returns the number of bytes read.
+    ///
+    /// The function must be called with valid byte array `buf` of sufficient
+    /// size to hold the message bytes. If a message is too long to fit in the
+    /// supplied buffer, excess bytes may be discarded.
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_with(|device| device.recv(buf)).await
+    }
+    /// Tries to receive a single packet from the device.
+    /// On success, returns the number of bytes read.
+    ///
+    /// This method must be called with valid byte array `buf` of sufficient size
+    /// to hold the message bytes. If a message is too long to fit in the
+    /// supplied buffer, excess bytes may be discarded.
+    ///
+    /// When there is no pending data, `Err(io::ErrorKind::WouldBlock)` is
+    /// returned. This function is usually paired with `readable()`.
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.try_read_io(|device| device.recv(buf))
+    }
+
+    /// Send a packet to the device
+    ///
+    /// # Return
+    /// On success, the number of bytes sent is returned, otherwise, the encountered error is returned.
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.write_with(|device| device.send(buf)).await
+    }
+    /// Tries to send packet to the device.
+    ///
+    /// When the device buffer is full, `Err(io::ErrorKind::WouldBlock)` is
+    /// returned. This function is usually paired with `writable()`.
+    ///
+    /// # Returns
+    ///
+    /// If successful, `Ok(n)` is returned, where `n` is the number of bytes
+    /// sent. If the device is not ready to send data,
+    /// `Err(ErrorKind::WouldBlock)` is returned.
+    pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.try_write_io(|device| device.send(buf))
+    }
+    /// Receives a packet into multiple buffers (scatter read).
+    /// **Processes single packet per call**.
+    pub async fn recv_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.read_with(|device| device.recv_vectored(bufs)).await
+    }
+    /// Non-blocking version of `recv_vectored`.
+    pub fn try_recv_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.try_read_io(|device| device.recv_vectored(bufs))
+    }
+    /// Sends multiple buffers as a single packet (gather write).
+    pub async fn send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.write_with(|device| device.send_vectored(bufs)).await
+    }
+    /// Non-blocking version of `send_vectored`.
+    pub fn try_send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.try_write_io(|device| device.send_vectored(bufs))
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl AsyncDevice {
+    /// # Prerequisites
+    /// - The `IFF_MULTI_QUEUE` flag must be enabled.
+    /// - The system must support network interface multi-queue functionality.
+    ///
+    /// # Description
+    /// When multi-queue is enabled, create a new queue by duplicating an existing one.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        AsyncDevice::new_dev(self.get_ref().try_clone()?)
+    }
+    /// Recv a packet from the device.
+    /// If offload is enabled. This method can be used to obtain processed data.
+    ///
+    /// original_buffer is used to store raw data, including the VirtioNetHdr and the unsplit IP packet. The recommended size is 10 + 65535.
+    /// bufs and sizes are used to store the segmented IP packets. bufs.len == sizes.len > 65535/MTU
+    /// offset: Starting position
+    #[cfg(target_os = "linux")]
+    pub async fn recv_multiple<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<usize> {
+        if bufs.is_empty() || bufs.len() != sizes.len() {
+            return Err(io::Error::other("bufs error"));
+        }
+        if bufs.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many packet buffers",
+            ));
+        }
+        let tun = self.get_ref();
+        if tun.vnet_hdr {
+            let len = self.recv(original_buffer).await?;
+            if len <= VIRTIO_NET_HDR_LEN {
+                Err(io::Error::other(format!(
+                    "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})",
+                )))?
+            }
+            let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
+            tun.handle_virtio_read(
+                hdr,
+                &mut original_buffer[VIRTIO_NET_HDR_LEN..len],
+                bufs,
+                sizes,
+                offset,
+            )
+        } else {
+            let Some(buf) = bufs[0].as_mut().get_mut(offset..) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            };
+            let len = self.recv(buf).await?;
+            sizes[0] = len;
+            Ok(1)
+        }
+    }
+    /// Non-blocking variant of recv_multiple.
+    ///
+    /// Performs exactly one TUN read. When no packet is currently pending,
+    /// returns io::ErrorKind::WouldBlock.
+    #[cfg(target_os = "linux")]
+    pub fn try_recv_multiple<B: AsRef<[u8]> + AsMut<[u8]>>(
+        &self,
+        original_buffer: &mut [u8],
+        bufs: &mut [B],
+        sizes: &mut [usize],
+        offset: usize,
+    ) -> io::Result<usize> {
+        if bufs.is_empty() || bufs.len() != sizes.len() {
+            return Err(io::Error::other("bufs error"));
+        }
+        if bufs.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many packet buffers",
+            ));
+        }
+        let tun = self.get_ref();
+        if tun.vnet_hdr {
+            let len = self.try_recv(original_buffer)?;
+            if len <= VIRTIO_NET_HDR_LEN {
+                return Err(io::Error::other(format!(
+                    "length of packet ({len}) <= VIRTIO_NET_HDR_LEN ({VIRTIO_NET_HDR_LEN})"
+                )));
+            }
+            let hdr = VirtioNetHdr::decode(&original_buffer[..VIRTIO_NET_HDR_LEN])?;
+            tun.handle_virtio_read(
+                hdr,
+                &mut original_buffer[VIRTIO_NET_HDR_LEN..len],
+                bufs,
+                sizes,
+                offset,
+            )
+        } else {
+            let Some(buf) = bufs[0].as_mut().get_mut(offset..) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            };
+            let len = self.try_recv(buf)?;
+            sizes[0] = len;
+            Ok(1)
+        }
+    }
+
+    /// send multiple fragmented data packets.
+    /// GROTable can be reused, as it is used to assist in data merging.
+    /// Offset is the starting position of the data. Need to meet offset>10.
+    #[cfg(target_os = "linux")]
+    pub async fn send_multiple<B: crate::platform::ExpandBuffer>(
+        &self,
+        gro_table: &mut GROTable,
+        bufs: &mut [B],
+        mut offset: usize,
+    ) -> io::Result<usize> {
+        gro_table.reset();
+        if bufs.is_empty() {
+            return Ok(0);
+        }
+        if bufs.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many packet buffers",
+            ));
+        }
+        let tun = self.get_ref();
+        if tun.vnet_hdr {
+            handle_gro(
+                bufs,
+                offset,
+                &mut gro_table.tcp_gro_table,
+                &mut gro_table.udp_gro_table,
+                tun.udp_gso,
+                &mut gro_table.to_write,
+            )?;
+            offset -= VIRTIO_NET_HDR_LEN;
+        } else {
+            for i in 0..bufs.len() {
+                gro_table.to_write.push(i);
+            }
+        }
+
+        let mut total = 0;
+        let mut err = Ok(());
+        for buf_idx in &gro_table.to_write {
+            let Some(buf) = bufs[*buf_idx].as_ref().get(offset..) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid offset",
+                ));
+            };
+            match self.send(buf).await {
+                Ok(n) => {
+                    total += n;
+                }
+                Err(e) => {
+                    if let Some(code) = e.raw_os_error() {
+                        if libc::EBADFD == code {
+                            return Err(e);
+                        }
+                    }
+                    err = Err(e)
+                }
+            }
+        }
+        err?;
+        Ok(total)
+    }
+}
