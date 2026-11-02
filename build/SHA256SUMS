@@ -2,3 +2,4 @@
 e59244d1a9ff99523e4b543d0e16f3f321d9cc72aad8c6b8ca4f763ec8ea05be *build/android/app-release.apk
 9c4a4f10f93dfb62152f37305d1e8a22e4c1f8ecdeac6788810fc32837fa6d2b *build/macos/oneq-node-macos-arm64.tar.gz
 30c78dcc2c88c273e490c115d091ffbd1e5a0d96f81a5139b162d052885bd19c *build/macos/oneq-node-macos-x64.tar.gz
+1d2ee1938f986bdf263fddf5e40ef93adbc4280fc4f4df3e8fbff66d83fd4ea6 *build/debian/oneqnode_0.0.1_amd64.deb
