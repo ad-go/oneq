@@ -137,8 +137,6 @@ registration without a proof; an administrator can reset a `node_id` by deleting
 
 ## Nodes behind NAT
 
-*English version of this section: [NAT.md](NAT.md).*
-
 Any node can reach any other node through the relay (WebSocket, always attached). A direct UDP path is established in addition, if the NATs allow it.
 
 **What `oneqrelay` does.** It starts by default a STUN service (RFC 5389, with `CHANGE-REQUEST` on port as in RFC 5780) on **three UDP ports**
