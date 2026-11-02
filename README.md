@@ -2,7 +2,7 @@
 
 # Two modes of operation
 
-1. **L2 oneq network with users and passwords (recommended):** `oneqrelay` (federated servers) + `oneqnode` (L2/TAP nodes), IP/MAC allocated automatically. Full description: [ARCHITECTURE.md](ARCHITECTURE.md). Formal wire protocol specification (formats, keys, transcript, threat model, what is not guaranteed): [specifications.html](specifications.html), verified with `spec_check.py`.
+1. **L2 oneq network with users and passwords (recommended):** `oneqrelay` (federated servers) + `oneqnode` (L2/TAP nodes), IP/MAC allocated automatically. Full description: [ARCHITECTURE.md](ARCHITECTURE.md).
 2. **Point-to-point (`oneqtunel.py`):** an L3 tunnel between two nodes with manually exchanged keys; see the sections below.
 
 Installing clients (Windows, macOS, Debian, Android), with command examples: [client/README.md](client/README.md#installing-a-client-examples).

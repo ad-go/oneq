@@ -12,6 +12,6 @@
 * What it stores, in the browser's local extension storage on your computer: the proxy and status addresses, extra networks you typed in the options page, whether the switch is on,
   and the last oneq network it saw. Nothing is synchronised to any account.
 * The oneq software itself (the proxy and the oneq network) is a separate program under your control; this policy covers the extension only. See the project documentation
-  for what the oneq servers you connect to can see (`specifications.html`, section 12).
+  for what the oneq servers you connect to can see (`ARCHITECTURE.md`, "Known limitations").
 
 Contact for privacy questions: `<CONTACT>` (to be filled in by the publisher before submission).

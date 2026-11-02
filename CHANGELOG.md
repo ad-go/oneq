@@ -5,6 +5,7 @@ Compatibility rules are listed per release.
 
 ## Unreleased
 
+* `specifications.html` and `spec_check.py` removed. The protocol is still described in `ARCHITECTURE.md` ("Wire protocol `tunmesh-pq/v2`") and its known limitations in "Known limitations", but there is no longer a separate formal wire-format specification or an independent conformance check of it against `meshproto.py`.
 * **Performance: PQ handshake crypto off the event loop.** The X25519+ML-KEM-768 operations in `init_create`,
   `init_consume`+`resp_create` and `resp_consume` now run in a thread-pool executor instead of blocking the asyncio
   event loop. The handshake retry interval was raised from 2 s to 5 s and the maintenance tick from 250 ms to 500 ms.

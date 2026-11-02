@@ -1,7 +1,7 @@
 # Security policy
 
 oneq is an **educational project without an independent cryptographic audit**. Do not rely on it for anything you could not afford to lose.
-`specifications.html` states the protocol, the threat model and, explicitly, what oneq does not guarantee.
+`ARCHITECTURE.md` describes the protocol and its known limitations.
 
 ## Reporting a vulnerability
 
@@ -18,7 +18,7 @@ There is no bug bounty and no guaranteed response time.
 In scope: the wire protocol `tunmesh-pq/v2` (`meshproto.py`, `oneqtunel.py`, `client/core/src/wire.rs`), the registry and relay (`oneqrelay`, `meshdb`,
 `oneqadmin`, `oneqtotp`), the nodes (`oneqnode`, the Rust client), the packaging scripts and the browser extension.
 
-Limits that are documented are not vulnerabilities by themselves: see `specifications.html`, section 12, and "Limite cunoscute" in `ARCHITECTURE.md`.
+Limits that are documented are not vulnerabilities by themselves: see "Known limitations" in `ARCHITECTURE.md`.
 
 ## Supported versions
 

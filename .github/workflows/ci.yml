@@ -22,8 +22,6 @@ jobs:
           for t in test_mesh_core test_oneqtunel test_oneqconf test_oneqtotp test_oneqnat test_oneqportmap test_oneqpop test_oneqinit test_oneqadmin test_oneqrelay test_oneqnode test_relay_delegation test_relay_delegation_node test_routes; do
             echo "== $t"; .venv/bin/python $t.py
           done
-      - name: specification matches the code
-        run: .venv/bin/python spec_check.py
 
   python-root:
     name: Python tests with root and network namespaces

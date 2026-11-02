@@ -61,7 +61,7 @@ The data plane goes directly between nodes (UDP, with hole punching) or, if not 
 
 ## Wire protocol `tunmesh-pq/v2`
 
-Messages (formal specification: [specifications.html](specifications.html)):
+Messages:
 
 | Message | Format | Role |
 |---|---|---|
