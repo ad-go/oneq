@@ -1,6 +1,6 @@
-# Proof of possession of the node key (English)
+# Proof of possession of the node key
 
-English version of the section "Dovada de posesie a cheii nodului" of `README.md` (Romanian).
+Companion to the "Node key proof of possession" section of `README.md`.
 
 ## The problem
 

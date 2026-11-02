@@ -120,8 +120,6 @@ strict CSP with no external resources, every change is logged with the client ad
 
 ## Node key proof of possession
 
-*English version: [POP.md](POP.md).*
-
 `node_id` is the hash of the public key, and public keys are not secret (the member list shows them). Without a proof, anyone with a token (point-to-point mode) or an account
 (oneq network) could register someone else's key with their own addresses or could claim a `node_id` before its owner. Node keys are KEM keys (X25519 + ML-KEM-768), not signing keys,
 so the proof is a **challenge** that only the holder of the private key can open (`oneqpop.py`):
@@ -315,7 +313,7 @@ sudo python3 test_e2e.py         # 2 real TUNs in namespaces: direct, forced rel
 
 ## Known limitations
 
-- **Node key proof of possession** (see section above, [POP.md](POP.md) in English): prevents a token/account holder who does not have the private key from claiming a `node_id`.
+- **Node key proof of possession** (see section above, [POP.md](POP.md)): prevents a token/account holder who does not have the private key from claiming a `node_id`.
   Does not protect against a compromised relay (which can delete a node and allocate its address to another key) or against an account holder who also has the key. Without
   `--require-pop`, a node that does not provide proof is accepted and its slot can be taken.
 - One peer per node (point-to-point mode); for multiple peers use the oneq mode.

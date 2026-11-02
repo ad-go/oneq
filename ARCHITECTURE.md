@@ -137,11 +137,9 @@ RFC 6238 vectors, with code reuse, recovery codes, lockout and the case where st
 `oneqpop.py` (standalone: only `cryptography`) contains the server's stateless challenge (`make_challenge`, `verify`), the node's response (`answer`, `Prover` with cache) and
 the server key derived from the federation secret. `oneqrelay.h_challenge` and `h_put_node` (the `pop` field; `meshdb.join_node(..., verified)` keeps `pop: true` in the node's registration,
 replicated; without proof, a marked node is not updated), `rendezvous_server` (same scheme, plus `X-Oneq-Pop` on relay attachment), Python client (`oneqnode.Control._pop`,
-`oneqtunel.Rendezvous.proof`) and Rust client (`wire.rs::Identity::pop_answer`, `control.rs::pop_proof`). Description: README, "Node key proof of possession"; English: POP.md.
+`oneqtunel.Rendezvous.proof`) and Rust client (`wire.rs::Identity::pop_answer`, `control.rs::pop_proof`). Description: README, "Node key proof of possession"; details: POP.md.
 
 ## NAT (oneqnat)
-
-*English version: [NAT.md](NAT.md).*
 
 `oneqnat.py` contains the STUN codec (RFC 5389 + change-port), the server (three UDP sockets in `oneqrelay`), classification, the
 `can_punch` rule and the reachability probe; the Rust client has the same logic in `client/core/src/nat.rs` (same constants and same
